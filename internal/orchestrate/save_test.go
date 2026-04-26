@@ -22,6 +22,8 @@ type mockCmuxClient struct {
 	workspaceList     *client.WorkspaceListResponse
 	remoteStatuses    []client.RemoteStatusPayload
 	remoteStatusCalls []string
+	remoteWorkspaceID string
+	remoteIDSet       bool
 	remoteCreated     []client.RemoteSSHOpts
 	panesCreated      []client.PaneCreateOpts
 	surfacesCreated   []client.PaneCreateOpts
@@ -82,7 +84,11 @@ func (m *mockCmuxClient) RemoteStatus(workspaceID string) (*client.RemoteStatusP
 
 func (m *mockCmuxClient) NewRemoteWorkspace(opts client.RemoteSSHOpts) (string, string, error) {
 	m.remoteCreated = append(m.remoteCreated, opts)
-	return "workspace:remote-new", "remote-new-id", nil
+	workspaceID := m.remoteWorkspaceID
+	if !m.remoteIDSet && workspaceID == "" {
+		workspaceID = "remote-new-id"
+	}
+	return "workspace:remote-new", workspaceID, nil
 }
 
 func (m *mockCmuxClient) NewPane(opts client.PaneCreateOpts) (string, string, error) {

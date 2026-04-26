@@ -284,6 +284,62 @@ func TestRestore_RemoteBrowserWaitsForProxyStatus(t *testing.T) {
 	}
 }
 
+func TestRestore_RemoteBrowserProxyStatusFallsBackToWorkspaceRef(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	layout := &model.Layout{
+		Name:    "remote-browser-ref",
+		Version: 1,
+		SavedAt: time.Now().UTC(),
+		Workspaces: []model.Workspace{
+			{
+				Title: "gpu-box",
+				CWD:   "/home/dev/project",
+				Index: 0,
+				Remote: &model.RemoteWorkspace{
+					Enabled:         true,
+					Provider:        "cmux_ssh",
+					Destination:     "dev@gpu-box",
+					CaptureComplete: true,
+				},
+				Panes: []model.Pane{
+					{Type: "terminal", Focus: true, Surfaces: []model.Surface{{Type: "terminal", Selected: true}}},
+					{Type: "browser", Split: "right", URL: "http://localhost:3000", Index: 1},
+				},
+			},
+		},
+	}
+	if err := store.Save("remote-browser-ref", layout); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    &client.TreeResponse{},
+			sidebarCWDs: map[string]string{},
+		},
+		remoteIDSet: true,
+		remoteStatuses: []client.RemoteStatusPayload{
+			{Enabled: true, State: "connected", Proxy: client.RemoteProxyPayload{State: "ready"}},
+		},
+	}
+	restorer := &Restorer{Client: mc, Store: store}
+
+	result, err := restorer.Restore("remote-browser-ref", false, RestoreModeAdd)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result.WorkspacesOK != 1 {
+		t.Fatalf("WorkspacesOK = %d, errors=%v", result.WorkspacesOK, result.Errors)
+	}
+	if len(mc.remoteStatusCalls) != 1 || mc.remoteStatusCalls[0] != "workspace:remote-new" {
+		t.Fatalf("RemoteStatus calls = %#v, want workspace ref fallback", mc.remoteStatusCalls)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("Warnings = %#v, want none", result.Warnings)
+	}
+}
+
 func TestRestore_BrowserPaneUsesPaneCreate(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := persist.NewFileStore(dir)

@@ -182,7 +182,7 @@ func (r *Restorer) restoreWorkspace(ws model.Workspace, dryRun bool, result *Res
 
 	// 3. Create additional panes/surfaces and send commands.
 	if isRemoteWorkspace(ws) && hasBrowserSurface(ws) {
-		r.waitForRemoteProxy(workspaceID, ws.Title, result)
+		r.waitForRemoteProxy(workspaceID, ref, ws.Title, result)
 	}
 	r.restorePanes(ref, ws, result)
 
@@ -260,12 +260,16 @@ func hasBrowserSurface(ws model.Workspace) bool {
 	return false
 }
 
-func (r *Restorer) waitForRemoteProxy(workspaceID, title string, result *RestoreResult) {
+func (r *Restorer) waitForRemoteProxy(workspaceID, workspaceRef, title string, result *RestoreResult) {
 	remoteClient, ok := r.Client.(client.CmuxRemoteBackend)
 	if !ok {
 		return
 	}
-	if strings.TrimSpace(workspaceID) == "" {
+	target := strings.TrimSpace(workspaceID)
+	if target == "" {
+		target = strings.TrimSpace(workspaceRef)
+	}
+	if target == "" {
 		r.warn(result, fmt.Sprintf("workspace %q: remote proxy status unavailable before browser restore", title))
 		return
 	}
@@ -273,7 +277,7 @@ func (r *Restorer) waitForRemoteProxy(workspaceID, title string, result *Restore
 	deadline := time.Now().Add(RemoteProxyReadyDeadline)
 	var last *client.RemoteStatusPayload
 	for {
-		status, err := remoteClient.RemoteStatus(workspaceID)
+		status, err := remoteClient.RemoteStatus(target)
 		if err == nil && status != nil {
 			last = status
 			if remoteProxyUsable(status) {

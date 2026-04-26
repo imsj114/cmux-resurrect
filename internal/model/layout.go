@@ -52,13 +52,20 @@ type Pane struct {
 
 // Surface represents a terminal or browser surface inside a pane.
 type Surface struct {
-	Type     string `toml:"type"`
-	Title    string `toml:"title,omitempty"`
-	CWD      string `toml:"cwd,omitempty"`
-	URL      string `toml:"url,omitempty"`
-	Command  string `toml:"command,omitempty"`
-	Index    int    `toml:"index,omitempty"`
-	Selected bool   `toml:"selected,omitempty"`
+	Type     string        `toml:"type"`
+	Title    string        `toml:"title,omitempty"`
+	CWD      string        `toml:"cwd,omitempty"`
+	URL      string        `toml:"url,omitempty"`
+	Command  string        `toml:"command,omitempty"`
+	Index    int           `toml:"index,omitempty"`
+	Selected bool          `toml:"selected,omitempty"`
+	Agent    *AgentSession `toml:"agent,omitempty"`
+}
+
+// AgentSession stores a resumable coding-agent session attached to a terminal surface.
+type AgentSession struct {
+	Kind      string `toml:"kind,omitempty"`
+	SessionID string `toml:"session_id,omitempty"`
 }
 
 // LayoutMeta holds summary info about a saved layout (for list command).

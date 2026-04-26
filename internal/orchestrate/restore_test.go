@@ -253,6 +253,59 @@ func TestRestore_DryRunReplaysTerminalWorkingDirectories(t *testing.T) {
 	}
 }
 
+func TestRestore_DryRunResumesCodexSession(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+
+	layout := &model.Layout{
+		Name:    "codex-resume",
+		Version: 1,
+		SavedAt: time.Now().UTC(),
+		Workspaces: []model.Workspace{
+			{
+				Title: "codex",
+				CWD:   "/tmp",
+				Index: 0,
+				Panes: []model.Pane{
+					{
+						Index: 0,
+						Type:  "terminal",
+						Surfaces: []model.Surface{
+							{
+								Type:     "terminal",
+								CWD:      "/tmp/codex repo",
+								Selected: true,
+								Agent: &model.AgentSession{
+									Kind:      "codex",
+									SessionID: "codex-session-1",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := store.Save("codex-resume", layout); err != nil {
+		t.Fatalf("save layout: %v", err)
+	}
+
+	restorer := &Restorer{Client: &mockClient{}, Store: store}
+	result, err := restorer.Restore("codex-resume", true, RestoreModeAdd)
+	if err != nil {
+		t.Fatalf("restore dry-run: %v", err)
+	}
+
+	cdIndex := commandIndex(result.Commands, "cd '/tmp/codex repo'")
+	resumeIndex := commandIndex(result.Commands, "codex resume 'codex-session-1'")
+	if cdIndex < 0 || resumeIndex < 0 {
+		t.Fatalf("missing codex resume commands: %#v", result.Commands)
+	}
+	if cdIndex > resumeIndex {
+		t.Fatalf("cwd command should precede codex resume: %#v", result.Commands)
+	}
+}
+
 func TestRestore_LayoutNotFound(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := persist.NewFileStore(dir)

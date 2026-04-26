@@ -52,10 +52,11 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 
 	metadata := s.workspaceMetadata()
 	terminalMetadata := s.terminalMetadata()
+	agentSessions := loadAgentSessionIndex()
 	topologyCaptured := make(map[string]bool)
 	for _, tw := range win.Workspaces {
 		row, hasRow := metadata.find(tw)
-		ws, captured, err := s.buildWorkspace(tw, row, hasRow, terminalMetadata)
+		ws, captured, err := s.buildWorkspace(tw, row, hasRow, terminalMetadata, agentSessions)
 		if err != nil {
 			// Log but don't fail — isolate errors per workspace.
 			fmt.Fprintf(os.Stderr, "  warning: workspace %q: %v\n", tw.Title, err)
@@ -151,7 +152,7 @@ func (idx workspaceMetadataIndex) find(tw client.TreeWorkspace) (client.Workspac
 	return client.WorkspaceRow{}, false
 }
 
-func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool, terminals terminalMetadataIndex) (*model.Workspace, bool, error) {
+func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool, terminals terminalMetadataIndex, agents agentSessionIndex) (*model.Workspace, bool, error) {
 	// Get CWD from sidebar-state.
 	sidebar, err := s.Client.SidebarState(tw.Ref)
 	if err != nil {
@@ -193,7 +194,7 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 			pane.Split = "right"
 		}
 
-		pane.Surfaces = buildSurfaces(tp, terminals)
+		pane.Surfaces = buildSurfaces(tp, terminals, agents)
 		mirrorSelectedSurface(&pane, tp)
 
 		ws.Panes = append(ws.Panes, pane)
@@ -224,7 +225,7 @@ func remoteWorkspaceFromStatus(status client.RemoteStatusPayload) *model.RemoteW
 	return remote
 }
 
-func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex) []model.Surface {
+func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex, agents agentSessionIndex) []model.Surface {
 	surfaces := make([]client.TreeSurface, len(tp.Surfaces))
 	copy(surfaces, tp.Surfaces)
 	sort.Slice(surfaces, func(i, j int) bool {
@@ -249,6 +250,13 @@ func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex) []model.
 		}
 		if item.Type != "browser" {
 			item.CWD = terminals.cwdFor(surf)
+			if agentRecord, ok := agents.recordFor(surf.ID); ok {
+				agent := agentRecord.agent
+				item.Agent = &agent
+				if item.CWD == "" {
+					item.CWD = agentRecord.cwd
+				}
+			}
 		}
 		result = append(result, item)
 	}
@@ -367,6 +375,9 @@ func mergeUserEdits(live, existing *model.Layout, topologyCaptured map[string]bo
 			if !topologyCaptured[lw.Title] && ep.Split != "" && ep.Split != "right" {
 				lp.Split = ep.Split
 			}
+			if lp.CWD == "" && ep.CWD != "" {
+				lp.CWD = ep.CWD
+			}
 			// Preserve user-set command.
 			if ep.Command != "" {
 				lp.Command = ep.Command
@@ -411,6 +422,16 @@ func mergeSurfaceCommands(live, existing *model.Pane) {
 			if live.Surfaces[i].Selected {
 				live.Command = existing.Surfaces[i].Command
 			}
+		}
+		if live.Surfaces[i].CWD == "" && existing.Surfaces[i].CWD != "" {
+			live.Surfaces[i].CWD = existing.Surfaces[i].CWD
+			if live.Surfaces[i].Selected && live.CWD == "" {
+				live.CWD = existing.Surfaces[i].CWD
+			}
+		}
+		if live.Surfaces[i].Agent == nil && existing.Surfaces[i].Agent != nil {
+			agent := *existing.Surfaces[i].Agent
+			live.Surfaces[i].Agent = &agent
 		}
 	}
 }

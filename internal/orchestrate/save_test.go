@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -372,6 +373,74 @@ func TestSave_CapturesTerminalSurfaceWorkingDirectories(t *testing.T) {
 	}
 	if got := panes[1].Surfaces[0].CWD; got != "/tmp/other package" {
 		t.Errorf("surface 1 CWD = %q, want /tmp/other package", got)
+	}
+}
+
+func TestSave_CapturesCodexAgentSession(t *testing.T) {
+	hookDir := t.TempDir()
+	t.Setenv("CMUX_AGENT_HOOK_STATE_DIR", hookDir)
+	hookState := `{
+		"sessions": {
+			"codex-session-1": {
+				"sessionId": "codex-session-1",
+				"workspaceId": "workspace-uuid-1",
+				"surfaceId": "surface-uuid-1",
+				"cwd": "/tmp/codex repo",
+				"updatedAt": 100
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(hookDir, "codex-hook-sessions.json"), []byte(hookState), 0o600); err != nil {
+		t.Fatalf("write hook state: %v", err)
+	}
+
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						Ref:   "workspace:1",
+						Title: "codex-layout",
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:0",
+								Index:              0,
+								SelectedSurfaceRef: "surface:1",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-uuid-1", Ref: "surface:1", Type: "terminal", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:1": "/tmp/codex repo"},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("codex-layout", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	surface := layout.Workspaces[0].Panes[0].Surfaces[0]
+	if surface.CWD != "/tmp/codex repo" {
+		t.Errorf("surface CWD = %q, want hook cwd", surface.CWD)
+	}
+	if surface.Agent == nil {
+		t.Fatal("missing agent session")
+	}
+	if surface.Agent.Kind != "codex" || surface.Agent.SessionID != "codex-session-1" {
+		t.Errorf("agent = %#v, want codex/codex-session-1", surface.Agent)
 	}
 }
 

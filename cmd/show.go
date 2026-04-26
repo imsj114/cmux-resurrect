@@ -123,6 +123,9 @@ func runShow(cmd *cobra.Command, args []string) error {
 				if surface.CWD != "" {
 					fmt.Fprintf(os.Stderr, "   %s   %s\n", dimStyle.Render("│"), dimStyle.Render(label+" cwd "+surface.CWD))
 				}
+				if surface.Agent != nil && surface.Agent.Kind != "" && surface.Agent.SessionID != "" {
+					fmt.Fprintf(os.Stderr, "   %s   %s\n", dimStyle.Render("│"), dimStyle.Render(label+" "+surface.Agent.Kind+" resume "+surface.Agent.SessionID))
+				}
 				value := surface.Command
 				if surface.URL != "" {
 					value = surface.URL

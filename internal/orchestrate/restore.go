@@ -473,10 +473,27 @@ func terminalStartupLines(ws model.Workspace, pane model.Pane, surface model.Sur
 	if cwd := terminalSurfaceCWD(ws, pane, surface); cwd != "" {
 		lines = append(lines, "cd "+shellQuote(cwd))
 	}
-	if command := strings.TrimSpace(surface.Command); command != "" {
+	if command := terminalSurfaceCommand(surface); command != "" {
 		lines = append(lines, command)
 	}
 	return lines
+}
+
+func terminalSurfaceCommand(surface model.Surface) string {
+	if command := strings.TrimSpace(surface.Command); command != "" {
+		return command
+	}
+	if surface.Agent == nil {
+		return ""
+	}
+	sessionID := strings.TrimSpace(surface.Agent.SessionID)
+	switch strings.ToLower(strings.TrimSpace(surface.Agent.Kind)) {
+	case "codex":
+		if sessionID != "" {
+			return "codex resume " + shellQuote(sessionID)
+		}
+	}
+	return ""
 }
 
 func terminalSurfaceCWD(ws model.Workspace, pane model.Pane, surface model.Surface) string {

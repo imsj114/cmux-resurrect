@@ -40,6 +40,29 @@ go install github.com/drolosoft/cmux-resurrect/cmd/crex@latest
 
 > For building from source, see [docs/building.md](docs/building.md).
 
+### Install this fork / development branch
+
+The Homebrew formula above installs the upstream release. To use unreleased cmux SSH workspace and Codex session restore support from this fork, build the active branch directly:
+
+```sh
+git clone https://github.com/imsj114/cmux-resurrect.git
+cd cmux-resurrect
+git checkout plan/cmux-ssh-restore
+make build
+mkdir -p ~/.local/bin
+install -m 0755 bin/crex ~/.local/bin/crex
+```
+
+Make sure `~/.local/bin` is before any Homebrew `crex` in your shell path:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+which crex
+crex version
+```
+
+For another Mac, push this branch first, then run the same clone/build/install commands there. Saved layouts live in `~/.config/crex/layouts/`; copy or sync that directory if you want the same saved layouts on another machine.
+
 ### Enable Shell Completion
 
 Homebrew users get completions automatically. For manual installs, add one line to your shell config:
@@ -76,6 +99,14 @@ crex restore my-day                       # bring it all back
 Every tab, pane arrangement, CWD, pinned state, and startup command — captured and restored. Layouts are saved to `~/.config/crex/layouts/`.
 
 <p align="center"><img src="assets/save-my-day.png" alt="crex save my-day" width="700"></p>
+
+### cmux SSH workspaces and Codex sessions
+
+For cmux, crex can restore workspaces created with `cmux ssh <destination>`. It recreates the remote workspace, pane structure, terminal/browser surfaces, and per-pane working directories.
+
+If a terminal surface is running Codex, crex records the active Codex session ID and restores it with `codex resume <session-id>` after returning to the captured working directory. crex first reads cmux Codex hook state when available, and also falls back to inspecting the active remote Codex process so sessions can be captured even when hook state has not been installed.
+
+Remote SSH replay is exact when cmux exposes all connection fields. If cmux reports hidden SSH options or identity files, crex saves a warning and preserves any manually added `identity_file` / `ssh_option` fields in the layout TOML.
 
 ## 🧙 Setup Wizard
 

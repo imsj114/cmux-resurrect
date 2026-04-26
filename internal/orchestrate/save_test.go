@@ -509,7 +509,8 @@ func TestSave_CapturesCodexAgentSession(t *testing.T) {
 }
 
 func TestSave_CapturesRemoteCodexAgentSession(t *testing.T) {
-	oldReader := remoteCodexHookSessionReader
+	oldHookReader := remoteCodexHookSessionReader
+	oldProcessReader := remoteCodexProcessSessionReader
 	var seenRemote *model.RemoteWorkspace
 	remoteCodexHookSessionReader = func(remote *model.RemoteWorkspace) ([]byte, error) {
 		copy := *remote
@@ -526,7 +527,13 @@ func TestSave_CapturesRemoteCodexAgentSession(t *testing.T) {
 			}
 		}`), nil
 	}
-	t.Cleanup(func() { remoteCodexHookSessionReader = oldReader })
+	remoteCodexProcessSessionReader = func(remote *model.RemoteWorkspace) ([]byte, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		remoteCodexHookSessionReader = oldHookReader
+		remoteCodexProcessSessionReader = oldProcessReader
+	})
 
 	treeResp := &client.TreeResponse{
 		Windows: []client.TreeWindow{
@@ -617,6 +624,90 @@ func TestSave_CapturesRemoteCodexAgentSession(t *testing.T) {
 	}
 	if surface.Agent.Kind != "codex" || surface.Agent.SessionID != "codex-remote-session-1" {
 		t.Errorf("agent = %#v, want codex/codex-remote-session-1", surface.Agent)
+	}
+}
+
+func TestSave_CapturesRemoteCodexAgentSessionFromProcess(t *testing.T) {
+	oldHookReader := remoteCodexHookSessionReader
+	oldProcessReader := remoteCodexProcessSessionReader
+	var processReaderCalled bool
+	remoteCodexHookSessionReader = func(remote *model.RemoteWorkspace) ([]byte, error) {
+		return []byte(`{"sessions":{}}`), nil
+	}
+	remoteCodexProcessSessionReader = func(remote *model.RemoteWorkspace) ([]byte, error) {
+		processReaderCalled = true
+		return []byte("surface-uuid-remote\t019dca4e-e022-7f03-aa12-e02a1c102d56\t/home/ubuntu/bin\t1777215690\n"), nil
+	}
+	t.Cleanup(func() {
+		remoteCodexHookSessionReader = oldHookReader
+		remoteCodexProcessSessionReader = oldProcessReader
+	})
+
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						ID:    "workspace-uuid-remote",
+						Ref:   "workspace:remote",
+						Title: "remote-codex",
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:remote",
+								Index:              0,
+								SelectedSurfaceRef: "surface:remote",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-uuid-remote", Ref: "surface:remote", Type: "terminal", Title: "bin", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:remote": "/Users/local/project"},
+		},
+		workspaceList: &client.WorkspaceListResponse{
+			Workspaces: []client.WorkspaceRow{
+				{
+					ID:               "workspace-uuid-remote",
+					Ref:              "workspace:remote",
+					Title:            "remote-codex",
+					CurrentDirectory: "/Users/local/project",
+					Remote: client.RemoteStatusPayload{
+						Enabled:     true,
+						Destination: "home",
+					},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("remote-codex-layout", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if !processReaderCalled {
+		t.Fatal("remote codex process sessions were not read")
+	}
+
+	surface := layout.Workspaces[0].Panes[0].Surfaces[0]
+	if surface.CWD != "/home/ubuntu/bin" {
+		t.Errorf("surface CWD = %q, want process cwd", surface.CWD)
+	}
+	if surface.Agent == nil {
+		t.Fatal("missing remote process agent session")
+	}
+	if surface.Agent.Kind != "codex" || surface.Agent.SessionID != "019dca4e-e022-7f03-aa12-e02a1c102d56" {
+		t.Errorf("agent = %#v, want process codex session", surface.Agent)
 	}
 }
 

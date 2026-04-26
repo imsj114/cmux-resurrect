@@ -3,7 +3,9 @@ package client
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestTreeResponseParsing(t *testing.T) {
@@ -50,4 +52,38 @@ func TestTreeResponseParsing(t *testing.T) {
 	if resp.Caller.WorkspaceRef != "workspace:6" {
 		t.Errorf("caller workspace = %q", resp.Caller.WorkspaceRef)
 	}
+}
+
+func TestCLIClientTreeRequestsIDs(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	binPath := filepath.Join(dir, "cmux-fake")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuoteForTest(argsPath) + "\nprintf '{\"windows\":[]}'\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake cmux: %v", err)
+	}
+
+	client := &CLIClient{Binary: binPath, Timeout: 2 * time.Second}
+	if _, err := client.Tree(); err != nil {
+		t.Fatalf("Tree: %v", err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	if got, want := string(args), "--id-format both tree --json\n"; got != want {
+		t.Fatalf("cmux args = %q, want %q", got, want)
+	}
+}
+
+func shellQuoteForTest(value string) string {
+	out := "'"
+	for _, r := range value {
+		if r == '\'' {
+			out += "'\\''"
+			continue
+		}
+		out += string(r)
+	}
+	return out + "'"
 }

@@ -63,9 +63,12 @@ func (c *CLIClient) Ping() error {
 }
 
 func (c *CLIClient) Tree() (*TreeResponse, error) {
-	out, err := c.run("tree", "--json")
+	out, err := c.run("--id-format", "both", "tree", "--json")
 	if err != nil {
-		return nil, err
+		out, err = c.run("tree", "--json")
+		if err != nil {
+			return nil, err
+		}
 	}
 	var resp TreeResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {

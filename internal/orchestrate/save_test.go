@@ -508,6 +508,118 @@ func TestSave_CapturesCodexAgentSession(t *testing.T) {
 	}
 }
 
+func TestSave_CapturesRemoteCodexAgentSession(t *testing.T) {
+	oldReader := remoteCodexHookSessionReader
+	var seenRemote *model.RemoteWorkspace
+	remoteCodexHookSessionReader = func(remote *model.RemoteWorkspace) ([]byte, error) {
+		copy := *remote
+		seenRemote = &copy
+		return []byte(`{
+			"sessions": {
+				"codex-remote-session-1": {
+					"sessionId": "codex-remote-session-1",
+					"workspaceId": "workspace-uuid-remote",
+					"surfaceId": "surface-uuid-remote",
+					"cwd": "/home/ubuntu/repo",
+					"updatedAt": 200
+				}
+			}
+		}`), nil
+	}
+	t.Cleanup(func() { remoteCodexHookSessionReader = oldReader })
+
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						ID:    "workspace-uuid-remote",
+						Ref:   "workspace:remote",
+						Title: "remote-codex",
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:remote",
+								Index:              0,
+								SelectedSurfaceRef: "surface:remote",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-uuid-remote", Ref: "surface:remote", Type: "terminal", Title: "ubuntu@ubuntu-server: ~/repo", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:remote": "/Users/local/project"},
+		},
+		workspaceList: &client.WorkspaceListResponse{
+			Workspaces: []client.WorkspaceRow{
+				{
+					ID:               "workspace-uuid-remote",
+					Ref:              "workspace:remote",
+					Title:            "remote-codex",
+					CurrentDirectory: "/Users/local/project",
+					Remote: client.RemoteStatusPayload{
+						Enabled:       true,
+						Destination:   "home",
+						HasSSHOptions: true,
+					},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	if err := store.Save("remote-codex-layout", &model.Layout{
+		Name:    "remote-codex-layout",
+		Version: 1,
+		Workspaces: []model.Workspace{
+			{
+				Title: "remote-codex",
+				Remote: &model.RemoteWorkspace{
+					Enabled:     true,
+					Provider:    "cmux_ssh",
+					Destination: "home",
+					SSHOptions:  []string{"ProxyJump jump"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write existing layout: %v", err)
+	}
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("remote-codex-layout", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if seenRemote == nil {
+		t.Fatal("remote codex hook state was not read")
+	}
+	if seenRemote.Destination != "home" {
+		t.Errorf("remote destination = %q, want home", seenRemote.Destination)
+	}
+	if len(seenRemote.SSHOptions) != 1 || seenRemote.SSHOptions[0] != "ProxyJump jump" {
+		t.Errorf("remote ssh options = %#v, want existing replay fields", seenRemote.SSHOptions)
+	}
+
+	surface := layout.Workspaces[0].Panes[0].Surfaces[0]
+	if surface.CWD != "~/repo" {
+		t.Errorf("surface CWD = %q, want title cwd", surface.CWD)
+	}
+	if surface.Agent == nil {
+		t.Fatal("missing remote agent session")
+	}
+	if surface.Agent.Kind != "codex" || surface.Agent.SessionID != "codex-remote-session-1" {
+		t.Errorf("agent = %#v, want codex/codex-remote-session-1", surface.Agent)
+	}
+}
+
 // TestSave_PreservesWorkspaceDescription verifies that a user-edited
 // per-workspace description survives a re-save. cmux itself doesn't
 // expose descriptions through Tree/SidebarState, so crex keeps them as

@@ -53,10 +53,12 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 	metadata := s.workspaceMetadata()
 	terminalMetadata := s.terminalMetadata()
 	agentSessions := loadAgentSessionIndex()
+	existing := s.existingLayout(name)
+	existingWorkspaces := indexExistingWorkspaces(existing)
 	topologyCaptured := make(map[string]bool)
 	for _, tw := range win.Workspaces {
 		row, hasRow := metadata.find(tw)
-		ws, captured, err := s.buildWorkspace(tw, row, hasRow, terminalMetadata, agentSessions)
+		ws, captured, err := s.buildWorkspace(tw, row, hasRow, terminalMetadata, agentSessions, existingWorkspaces[tw.Title])
 		if err != nil {
 			// Log but don't fail — isolate errors per workspace.
 			fmt.Fprintf(os.Stderr, "  warning: workspace %q: %v\n", tw.Title, err)
@@ -71,7 +73,7 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 	}
 
 	// If a TOML already exists, merge user-edited fields (split direction, commands).
-	if existing, err := s.Store.Load(name); err == nil {
+	if existing != nil {
 		mergeUserEdits(layout, existing, topologyCaptured)
 	}
 
@@ -79,6 +81,27 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 		return nil, fmt.Errorf("save layout: %w", err)
 	}
 	return layout, nil
+}
+
+func (s *Saver) existingLayout(name string) *model.Layout {
+	existing, err := s.Store.Load(name)
+	if err != nil {
+		return nil
+	}
+	return existing
+}
+
+func indexExistingWorkspaces(layout *model.Layout) map[string]*model.Workspace {
+	byTitle := make(map[string]*model.Workspace)
+	if layout == nil {
+		return byTitle
+	}
+	for i := range layout.Workspaces {
+		if layout.Workspaces[i].Title != "" {
+			byTitle[layout.Workspaces[i].Title] = &layout.Workspaces[i]
+		}
+	}
+	return byTitle
 }
 
 func (s *Saver) workspaceMetadata() workspaceMetadataIndex {
@@ -152,7 +175,7 @@ func (idx workspaceMetadataIndex) find(tw client.TreeWorkspace) (client.Workspac
 	return client.WorkspaceRow{}, false
 }
 
-func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool, terminals terminalMetadataIndex, agents agentSessionIndex) (*model.Workspace, bool, error) {
+func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool, terminals terminalMetadataIndex, agents agentSessionIndex, existing *model.Workspace) (*model.Workspace, bool, error) {
 	// Get CWD from sidebar-state.
 	sidebar, err := s.Client.SidebarState(tw.Ref)
 	if err != nil {
@@ -173,6 +196,14 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 	}
 	if hasRow && row.Remote.Enabled {
 		ws.Remote = remoteWorkspaceFromStatus(row.Remote)
+		if existing != nil {
+			mergeRemoteReplayFields(ws.Remote, existing.Remote)
+		}
+	}
+
+	workspaceAgents := agents
+	if isRemoteWorkspaceModel(ws) {
+		workspaceAgents = agents.withRemote(ws.Remote)
 	}
 
 	// Sort panes by index.
@@ -194,7 +225,7 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 			pane.Split = "right"
 		}
 
-		pane.Surfaces = buildSurfaces(tp, terminals, agents, isRemoteWorkspaceModel(ws))
+		pane.Surfaces = buildSurfaces(tp, terminals, workspaceAgents, isRemoteWorkspaceModel(ws))
 		mirrorSelectedSurface(&pane, tp)
 
 		ws.Panes = append(ws.Panes, pane)
@@ -354,6 +385,22 @@ func finalizeRemoteReplay(remote *model.RemoteWorkspace) {
 	remote.Warning = "cmux hides " + strings.Join(missing, " and ") + "; add replay fields manually for exact restore"
 }
 
+func mergeRemoteReplayFields(live, existing *model.RemoteWorkspace) {
+	if live == nil || existing == nil {
+		return
+	}
+	if live.IdentityFile == "" {
+		live.IdentityFile = existing.IdentityFile
+	}
+	if len(live.SSHOptions) == 0 && len(existing.SSHOptions) > 0 {
+		live.SSHOptions = append([]string(nil), existing.SSHOptions...)
+	}
+	if live.Warning == "" && existing.Warning != "" {
+		live.Warning = existing.Warning
+	}
+	finalizeRemoteReplay(live)
+}
+
 // mergeUserEdits preserves user-edited fields from an existing TOML.
 // Fields like split direction, command, and description are kept from existing
 // if the user has edited them (since the live tree doesn't expose these).
@@ -379,16 +426,7 @@ func mergeUserEdits(live, existing *model.Layout, topologyCaptured map[string]bo
 			lw.Description = ew.Description
 		}
 		if lw.Remote != nil && ew.Remote != nil {
-			if lw.Remote.IdentityFile == "" {
-				lw.Remote.IdentityFile = ew.Remote.IdentityFile
-			}
-			if len(lw.Remote.SSHOptions) == 0 && len(ew.Remote.SSHOptions) > 0 {
-				lw.Remote.SSHOptions = append([]string(nil), ew.Remote.SSHOptions...)
-			}
-			if lw.Remote.Warning == "" && ew.Remote.Warning != "" {
-				lw.Remote.Warning = ew.Remote.Warning
-			}
-			finalizeRemoteReplay(lw.Remote)
+			mergeRemoteReplayFields(lw.Remote, ew.Remote)
 		}
 		// Merge pane-level user edits.
 		for j := range lw.Panes {

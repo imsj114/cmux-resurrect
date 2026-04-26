@@ -108,6 +108,54 @@ If a terminal surface is running Codex, crex records the active Codex session ID
 
 Remote SSH replay is exact when cmux exposes all connection fields. If cmux reports hidden SSH options or identity files, crex saves a warning and preserves any manually added `identity_file` / `ssh_option` fields in the layout TOML.
 
+### Sharing layouts with Syncthing
+
+To share layouts across Macs without a Git workflow, sync only the layout directory with [Syncthing](https://syncthing.net/). Keep `config.toml` machine-local unless every machine should use the exact same crex settings.
+
+Recommended topology with an always-on home server:
+
+```text
+Mac A        ~/.config/crex/layouts/
+  <---->     home server ~/sync/crex-layouts/
+  <---->     Mac B ~/.config/crex/layouts/
+```
+
+Install and start Syncthing:
+
+```sh
+# macOS
+brew install syncthing
+brew services start syncthing
+
+# Ubuntu home server
+sudo apt-get install syncthing
+loginctl enable-linger "$USER"
+systemctl --user enable --now syncthing.service
+```
+
+Then open Syncthing's UI and connect the devices:
+
+```sh
+# local Mac UI
+open http://127.0.0.1:8384
+
+# home server UI through SSH
+ssh -L 8385:127.0.0.1:8384 home
+# then open http://127.0.0.1:8385
+```
+
+Create one folder on each device with the same folder ID:
+
+| Device | Folder ID | Path |
+|--------|-----------|------|
+| Mac | `crex-layouts` | `~/.config/crex/layouts` |
+| home server | `crex-layouts` | `~/sync/crex-layouts` |
+| another Mac | `crex-layouts` | `~/.config/crex/layouts` |
+
+Use folder type `Send & Receive` on trusted personal devices. After pairing, `crex save test` on one Mac updates `test.toml` and Syncthing propagates it to the others.
+
+Layout TOML can contain local paths, remote host names, SSH replay hints, URLs, and Codex session IDs. Sync this folder only between trusted private devices; do not put it in a public shared folder.
+
 ## 🧙 Setup Wizard
 
 First time? `crex setup` walks you through everything:

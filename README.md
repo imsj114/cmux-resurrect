@@ -93,6 +93,7 @@ crex tui                                  # interactive shell
 ```sh
 crex save my-day                          # snapshot your layout
 crex save my-day -d "Friday deep work"    # add a description (preserved across re-saves)
+crex save home-shared --remote-only        # save only cmux SSH remote workspaces
 crex restore my-day                       # bring it all back
 ```
 
@@ -153,6 +154,14 @@ Create one folder on each device with the same folder ID:
 | another Mac | `crex-layouts` | `~/.config/crex/layouts` |
 
 Use folder type `Send & Receive` on trusted personal devices. After pairing, `crex save test` on one Mac updates `test.toml` and Syncthing propagates it to the others.
+
+If the layout is meant to work on multiple Macs, save the shared copy with `--remote-only`:
+
+```sh
+crex save home-shared --remote-only
+```
+
+This stores only workspaces created through `cmux ssh ...`. Local Mac-only workspaces, local paths, and local terminal surfaces are skipped, while remote pane structure, remote working directories, browser surfaces, and resumable Codex session IDs are still captured.
 
 Layout TOML can contain local paths, remote host names, SSH replay hints, URLs, and Codex session IDs. Sync this folder only between trusted private devices; do not put it in a public shared folder.
 

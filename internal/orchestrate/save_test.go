@@ -176,6 +176,163 @@ func TestSave_FromFixture(t *testing.T) {
 	}
 }
 
+func TestSave_RemoteOnlyFiltersLocalWorkspaces(t *testing.T) {
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						ID:    "workspace-local-id",
+						Ref:   "workspace:local",
+						Title: "local",
+						Index: 0,
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:local",
+								Index:              0,
+								SelectedSurfaceRef: "surface:local",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-local-id", Ref: "surface:local", Type: "terminal", Title: "zsh", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+					{
+						ID:    "workspace-remote-id",
+						Ref:   "workspace:remote",
+						Title: "home",
+						Index: 1,
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:remote",
+								Index:              0,
+								Focused:            true,
+								SelectedSurfaceRef: "surface:remote",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-remote-id", Ref: "surface:remote", Type: "terminal", Title: "ubuntu@home: ~/bin", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp: treeResp,
+			sidebarCWDs: map[string]string{
+				"workspace:local":  "/Users/local/project",
+				"workspace:remote": "/Users/local/cmux-proxy",
+			},
+		},
+		workspaceList: &client.WorkspaceListResponse{
+			Workspaces: []client.WorkspaceRow{
+				{
+					ID:    "workspace-local-id",
+					Ref:   "workspace:local",
+					Title: "local",
+				},
+				{
+					ID:               "workspace-remote-id",
+					Ref:              "workspace:remote",
+					Title:            "home",
+					CurrentDirectory: "/home/ubuntu",
+					Remote: client.RemoteStatusPayload{
+						Enabled:     true,
+						Destination: "home",
+					},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store, RemoteOnly: true}
+
+	layout, err := saver.Save("remote-only", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if len(layout.Workspaces) != 1 {
+		t.Fatalf("Workspaces = %d, want 1", len(layout.Workspaces))
+	}
+	ws := layout.Workspaces[0]
+	if ws.Title != "home" {
+		t.Fatalf("saved workspace title = %q, want home", ws.Title)
+	}
+	if ws.Remote == nil || !ws.Remote.Enabled || ws.Remote.Destination != "home" {
+		t.Fatalf("remote metadata = %#v, want enabled home remote", ws.Remote)
+	}
+	if ws.CWD != "~" {
+		t.Errorf("CWD = %q, want remote workspace default", ws.CWD)
+	}
+	if got := ws.Panes[0].Surfaces[0].CWD; got != "~/bin" {
+		t.Errorf("surface CWD = %q, want ~/bin from remote title", got)
+	}
+
+	saved, err := store.Load("remote-only")
+	if err != nil {
+		t.Fatalf("load saved: %v", err)
+	}
+	if len(saved.Workspaces) != 1 || saved.Workspaces[0].Title != "home" {
+		t.Fatalf("saved file workspaces = %#v, want only home", saved.Workspaces)
+	}
+}
+
+func TestSave_RemoteOnlyErrorsWhenNoRemoteWorkspaces(t *testing.T) {
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						ID:    "workspace-local-id",
+						Ref:   "workspace:local",
+						Title: "local",
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:local",
+								Index:              0,
+								SelectedSurfaceRef: "surface:local",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-local-id", Ref: "surface:local", Type: "terminal", Title: "zsh", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:local": "/Users/local/project"},
+		},
+		workspaceList: &client.WorkspaceListResponse{
+			Workspaces: []client.WorkspaceRow{
+				{ID: "workspace-local-id", Ref: "workspace:local", Title: "local"},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store, RemoteOnly: true}
+
+	_, err := saver.Save("remote-only", "")
+	if err == nil {
+		t.Fatal("expected remote-only save to fail without remote workspaces")
+	}
+	if !strings.Contains(err.Error(), "no remote workspaces") {
+		t.Fatalf("error = %v, want no remote workspaces", err)
+	}
+	if store.Exists("remote-only") {
+		t.Fatal("remote-only layout should not be written when no remote workspaces are captured")
+	}
+}
+
 func TestSave_MergePreservesUserEdits(t *testing.T) {
 	data, _ := os.ReadFile("../../testdata/responses/tree-6-workspaces.json")
 	var treeResp client.TreeResponse
@@ -857,8 +1014,8 @@ func TestSave_CapturesRemoteMetadataAndSurfaces(t *testing.T) {
 	}
 
 	ws := layout.Workspaces[0]
-	if ws.CWD != "/home/dev/project" {
-		t.Errorf("CWD = %q, want workspace.list current_directory", ws.CWD)
+	if ws.CWD != "~" {
+		t.Errorf("CWD = %q, want remote workspace default", ws.CWD)
 	}
 	if ws.Remote == nil {
 		t.Fatal("Remote metadata missing")

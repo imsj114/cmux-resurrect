@@ -9,7 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var saveDescription string
+var (
+	saveDescription string
+	saveRemoteOnly  bool
+)
 
 var saveCmd = &cobra.Command{
 	Use:   "save [name]",
@@ -21,6 +24,7 @@ var saveCmd = &cobra.Command{
 
 func init() {
 	saveCmd.Flags().StringVarP(&saveDescription, "description", "d", "", "layout description")
+	saveCmd.Flags().BoolVar(&saveRemoteOnly, "remote-only", false, "save only cmux SSH remote workspaces")
 	saveCmd.ValidArgsFunction = completeLayoutNames
 	rootCmd.AddCommand(saveCmd)
 }
@@ -37,7 +41,7 @@ func runSave(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	saver := &orchestrate.Saver{Client: cl, Store: store}
+	saver := &orchestrate.Saver{Client: cl, Store: store, RemoteOnly: saveRemoteOnly}
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "%s %s\n", yellowStyle.Render("💾 Saving layout"), greenStyle.Render(name))
@@ -45,6 +49,9 @@ func runSave(cmd *cobra.Command, args []string) error {
 	layout, err := saver.Save(name, saveDescription)
 	if err != nil {
 		return err
+	}
+	if saveRemoteOnly {
+		fmt.Fprintf(os.Stderr, "%s\n", dimStyle.Render("remote-only: skipped local workspaces"))
 	}
 
 	fmt.Fprintln(os.Stderr)

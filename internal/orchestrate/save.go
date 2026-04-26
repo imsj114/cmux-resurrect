@@ -14,8 +14,9 @@ import (
 
 // Saver captures the current cmux state and persists it.
 type Saver struct {
-	Client client.Backend
-	Store  persist.Store
+	Client     client.Backend
+	Store      persist.Store
+	RemoteOnly bool
 }
 
 type workspaceMetadataIndex struct {
@@ -64,11 +65,17 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 			fmt.Fprintf(os.Stderr, "  warning: workspace %q: %v\n", tw.Title, err)
 			continue
 		}
+		if s.RemoteOnly && !isRemoteWorkspaceModel(ws) {
+			continue
+		}
 		topologyCaptured[ws.Title] = captured
 		layout.Workspaces = append(layout.Workspaces, *ws)
 	}
 
 	if len(layout.Workspaces) == 0 {
+		if s.RemoteOnly {
+			return nil, fmt.Errorf("no remote workspaces could be captured")
+		}
 		return nil, fmt.Errorf("no workspaces could be captured")
 	}
 
@@ -186,6 +193,10 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 	if hasRow && strings.TrimSpace(row.CurrentDirectory) != "" {
 		cwd = row.CurrentDirectory
 	}
+	isRemote := hasRow && row.Remote.Enabled
+	if isRemote {
+		cwd = "~"
+	}
 
 	ws := &model.Workspace{
 		Title:  tw.Title,
@@ -194,7 +205,7 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 		Index:  tw.Index,
 		Active: tw.Active || tw.Selected,
 	}
-	if hasRow && row.Remote.Enabled {
+	if isRemote {
 		ws.Remote = remoteWorkspaceFromStatus(row.Remote)
 		if existing != nil {
 			mergeRemoteReplayFields(ws.Remote, existing.Remote)

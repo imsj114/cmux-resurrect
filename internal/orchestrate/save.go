@@ -46,14 +46,16 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 	}
 
 	metadata := s.workspaceMetadata()
+	topologyCaptured := make(map[string]bool)
 	for _, tw := range win.Workspaces {
 		row, hasRow := metadata.find(tw)
-		ws, err := s.buildWorkspace(tw, row, hasRow)
+		ws, captured, err := s.buildWorkspace(tw, row, hasRow)
 		if err != nil {
 			// Log but don't fail — isolate errors per workspace.
 			fmt.Fprintf(os.Stderr, "  warning: workspace %q: %v\n", tw.Title, err)
 			continue
 		}
+		topologyCaptured[ws.Title] = captured
 		layout.Workspaces = append(layout.Workspaces, *ws)
 	}
 
@@ -63,7 +65,7 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 
 	// If a TOML already exists, merge user-edited fields (split direction, commands).
 	if existing, err := s.Store.Load(name); err == nil {
-		mergeUserEdits(layout, existing)
+		mergeUserEdits(layout, existing, topologyCaptured)
 	}
 
 	if err := s.Store.Save(name, layout); err != nil {
@@ -119,11 +121,11 @@ func (idx workspaceMetadataIndex) find(tw client.TreeWorkspace) (client.Workspac
 	return client.WorkspaceRow{}, false
 }
 
-func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool) (*model.Workspace, error) {
+func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool) (*model.Workspace, bool, error) {
 	// Get CWD from sidebar-state.
 	sidebar, err := s.Client.SidebarState(tw.Ref)
 	if err != nil {
-		return nil, fmt.Errorf("sidebar-state: %w", err)
+		return nil, false, fmt.Errorf("sidebar-state: %w", err)
 	}
 
 	cwd := sidebar.CWD
@@ -172,7 +174,8 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 		ws.Panes = []model.Pane{{Type: "terminal", Focus: true}}
 	}
 
-	return ws, nil
+	topologyCaptured := s.applyPaneTopology(ws, tw.Ref, panes)
+	return ws, topologyCaptured, nil
 }
 
 func remoteWorkspaceFromStatus(status client.RemoteStatusPayload) *model.RemoteWorkspace {
@@ -267,7 +270,7 @@ func finalizeRemoteReplay(remote *model.RemoteWorkspace) {
 // mergeUserEdits preserves user-edited fields from an existing TOML.
 // Fields like split direction, command, and description are kept from existing
 // if the user has edited them (since the live tree doesn't expose these).
-func mergeUserEdits(live, existing *model.Layout) {
+func mergeUserEdits(live, existing *model.Layout, topologyCaptured map[string]bool) {
 	if live.Description == "" && existing.Description != "" {
 		live.Description = existing.Description
 	}
@@ -307,8 +310,9 @@ func mergeUserEdits(live, existing *model.Layout) {
 			}
 			ep := &ew.Panes[j]
 			lp := &lw.Panes[j]
-			// Preserve user-set split direction.
-			if ep.Split != "" && ep.Split != "right" {
+			// Preserve user-set split direction only when live geometry could not
+			// capture the structure. Geometry is authoritative when available.
+			if !topologyCaptured[lw.Title] && ep.Split != "" && ep.Split != "right" {
 				lp.Split = ep.Split
 			}
 			// Preserve user-set command.

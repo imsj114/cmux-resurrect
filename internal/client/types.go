@@ -147,9 +147,36 @@ type PaneCreateOpts struct {
 	URL          string
 }
 
+// PaneListResponse is the structured response from `cmux --json list-panes`.
+type PaneListResponse struct {
+	WorkspaceRef   string    `json:"workspace_ref"`
+	WindowRef      string    `json:"window_ref"`
+	ContainerFrame RectFrame `json:"container_frame"`
+	Panes          []PaneRow `json:"panes"`
+}
+
+// RectFrame describes a pane rectangle in screen pixels.
+type RectFrame struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// PaneRow contains geometry and identity details for one cmux pane.
+type PaneRow struct {
+	ID                 string    `json:"id"`
+	Ref                string    `json:"ref"`
+	Index              int       `json:"index"`
+	SurfaceRefs        []string  `json:"surface_refs"`
+	SelectedSurfaceRef string    `json:"selected_surface_ref"`
+	PixelFrame         RectFrame `json:"pixel_frame"`
+}
+
 // CmuxRemoteBackend exposes cmux-only APIs without extending generic backends.
 type CmuxRemoteBackend interface {
 	WorkspaceListJSON() (*WorkspaceListResponse, error)
+	PaneListJSON(workspaceRef string) (*PaneListResponse, error)
 	RemoteStatus(workspaceID string) (*RemoteStatusPayload, error)
 	NewRemoteWorkspace(opts RemoteSSHOpts) (workspaceRef string, workspaceID string, err error)
 	NewPane(opts PaneCreateOpts) (surfaceRef string, paneRef string, err error)

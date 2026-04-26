@@ -153,6 +153,50 @@ func TestRestore_DryRunFirstBrowserSurfaceShowsNewPane(t *testing.T) {
 	}
 }
 
+func TestRestore_DryRunReplaysFocusTargetsInPaneOrder(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+
+	layout := &model.Layout{
+		Name:    "layout-order",
+		Version: 1,
+		SavedAt: time.Now().UTC(),
+		Workspaces: []model.Workspace{
+			{
+				Title: "layout",
+				CWD:   "/tmp/project",
+				Index: 0,
+				Panes: []model.Pane{
+					{Index: 0, Type: "terminal", Focus: true},
+					{Index: 2, Type: "terminal", Split: "right", FocusTarget: 0},
+					{Index: 1, Type: "terminal", Split: "down", FocusTarget: 0},
+				},
+			},
+		},
+	}
+	if err := store.Save("layout-order", layout); err != nil {
+		t.Fatalf("save layout: %v", err)
+	}
+
+	restorer := &Restorer{Client: &mockClient{}, Store: store}
+	result, err := restorer.Restore("layout-order", true, RestoreModeAdd)
+	if err != nil {
+		t.Fatalf("restore dry-run: %v", err)
+	}
+
+	firstFocus := commandIndex(result.Commands, "focus-pane --pane pane:0")
+	rightSplit := commandIndex(result.Commands, "new-split right")
+	secondFocus := commandIndexAfter(result.Commands, "focus-pane --pane pane:0", rightSplit)
+	downSplit := commandIndex(result.Commands, "new-split down")
+	if firstFocus < 0 || rightSplit < 0 || secondFocus < 0 || downSplit < 0 {
+		t.Fatalf("missing layout replay commands: %#v", result.Commands)
+	}
+	if !(firstFocus < rightSplit && rightSplit < secondFocus && secondFocus < downSplit) {
+		t.Fatalf("unexpected replay order: focus=%d right=%d focus2=%d down=%d commands=%#v",
+			firstFocus, rightSplit, secondFocus, downSplit, result.Commands)
+	}
+}
+
 func TestRestore_LayoutNotFound(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := persist.NewFileStore(dir)
@@ -454,4 +498,17 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func commandIndex(commands []string, substr string) int {
+	return commandIndexAfter(commands, substr, -1)
+}
+
+func commandIndexAfter(commands []string, substr string, after int) int {
+	for i := after + 1; i < len(commands); i++ {
+		if containsStr(commands[i], substr) {
+			return i
+		}
+	}
+	return -1
 }

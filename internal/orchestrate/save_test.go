@@ -2,10 +2,13 @@ package orchestrate
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/drolosoft/cmux-resurrect/internal/client"
+	"github.com/drolosoft/cmux-resurrect/internal/model"
 	"github.com/drolosoft/cmux-resurrect/internal/persist"
 )
 
@@ -20,6 +23,7 @@ type mockClient struct {
 type mockCmuxClient struct {
 	mockClient
 	workspaceList     *client.WorkspaceListResponse
+	paneLists         map[string]*client.PaneListResponse
 	remoteStatuses    []client.RemoteStatusPayload
 	remoteStatusCalls []string
 	remoteWorkspaceID string
@@ -63,6 +67,13 @@ func (m *mockClient) DryRunFormatter() client.DryRunFormatter  { return client.C
 
 func (m *mockCmuxClient) WorkspaceListJSON() (*client.WorkspaceListResponse, error) {
 	return m.workspaceList, nil
+}
+
+func (m *mockCmuxClient) PaneListJSON(workspaceRef string) (*client.PaneListResponse, error) {
+	if m.paneLists == nil {
+		return nil, nil
+	}
+	return m.paneLists[workspaceRef], nil
 }
 
 func (m *mockCmuxClient) RemoteStatus(workspaceID string) (*client.RemoteStatusPayload, error) {
@@ -211,6 +222,86 @@ func TestSave_MergePreservesUserEdits(t *testing.T) {
 	}
 }
 
+func TestSave_CapturesPaneTopologyFromGeometry(t *testing.T) {
+	treeResp := paneTopologyTree()
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:1": "/tmp/project"},
+		},
+		paneLists: map[string]*client.PaneListResponse{
+			"workspace:1": {
+				WorkspaceRef: "workspace:1",
+				Panes: []client.PaneRow{
+					{Ref: "pane:0", Index: 0, PixelFrame: client.RectFrame{X: 0, Y: 0, Width: 1000, Height: 600}},
+					{Ref: "pane:1", Index: 1, PixelFrame: client.RectFrame{X: 0, Y: 600, Width: 500, Height: 400}},
+					{Ref: "pane:2", Index: 2, PixelFrame: client.RectFrame{X: 500, Y: 600, Width: 500, Height: 400}},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("pane-topology", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	panes := layout.Workspaces[0].Panes
+	if got := paneIndexes(panes); got != "0,1,2" {
+		t.Fatalf("pane indexes = %s, want 0,1,2", got)
+	}
+	if panes[1].Split != "down" || panes[1].FocusTarget != 0 {
+		t.Errorf("pane 1 split/focus = %q/%d, want down/0", panes[1].Split, panes[1].FocusTarget)
+	}
+	if panes[2].Split != "right" || panes[2].FocusTarget != 1 {
+		t.Errorf("pane 2 split/focus = %q/%d, want right/1", panes[2].Split, panes[2].FocusTarget)
+	}
+}
+
+func TestSave_CapturesPaneTopologyCreationOrder(t *testing.T) {
+	treeResp := paneTopologyTree()
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:1": "/tmp/project"},
+		},
+		paneLists: map[string]*client.PaneListResponse{
+			"workspace:1": {
+				WorkspaceRef: "workspace:1",
+				Panes: []client.PaneRow{
+					{Ref: "pane:0", Index: 0, PixelFrame: client.RectFrame{X: 0, Y: 0, Width: 500, Height: 500}},
+					{Ref: "pane:1", Index: 1, PixelFrame: client.RectFrame{X: 0, Y: 500, Width: 500, Height: 500}},
+					{Ref: "pane:2", Index: 2, PixelFrame: client.RectFrame{X: 500, Y: 0, Width: 500, Height: 1000}},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("pane-creation-order", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	panes := layout.Workspaces[0].Panes
+	if got := paneIndexes(panes); got != "0,2,1" {
+		t.Fatalf("pane indexes = %s, want 0,2,1", got)
+	}
+	if panes[1].Split != "right" || panes[1].FocusTarget != 0 {
+		t.Errorf("pane 2 split/focus = %q/%d, want right/0", panes[1].Split, panes[1].FocusTarget)
+	}
+	if panes[2].Split != "down" || panes[2].FocusTarget != 0 {
+		t.Errorf("pane 1 split/focus = %q/%d, want down/0", panes[2].Split, panes[2].FocusTarget)
+	}
+}
+
 // TestSave_PreservesWorkspaceDescription verifies that a user-edited
 // per-workspace description survives a re-save. cmux itself doesn't
 // expose descriptions through Tree/SidebarState, so crex keeps them as
@@ -262,6 +353,34 @@ func TestSave_PreservesWorkspaceDescription(t *testing.T) {
 			t.Errorf("Workspaces[%d].Description = %q, want empty", i, got)
 		}
 	}
+}
+
+func paneTopologyTree() *client.TreeResponse {
+	return &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						Ref:   "workspace:1",
+						Title: "layout",
+						Panes: []client.TreePane{
+							{Ref: "pane:0", Index: 0, Surfaces: []client.TreeSurface{{Ref: "surface:0", Type: "terminal", IndexInPane: 0, SelectedInPane: true}}},
+							{Ref: "pane:1", Index: 1, Surfaces: []client.TreeSurface{{Ref: "surface:1", Type: "terminal", IndexInPane: 0, SelectedInPane: true}}},
+							{Ref: "pane:2", Index: 2, Surfaces: []client.TreeSurface{{Ref: "surface:2", Type: "terminal", IndexInPane: 0, SelectedInPane: true}}},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func paneIndexes(panes []model.Pane) string {
+	parts := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		parts = append(parts, fmt.Sprintf("%d", pane.Index))
+	}
+	return strings.Join(parts, ",")
 }
 
 func TestSave_CapturesRemoteMetadataAndSurfaces(t *testing.T) {

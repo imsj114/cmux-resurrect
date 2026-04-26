@@ -246,6 +246,19 @@ func (c *CLIClient) WorkspaceListJSON() (*WorkspaceListResponse, error) {
 	return &resp, nil
 }
 
+func (c *CLIClient) PaneListJSON(workspaceRef string) (*PaneListResponse, error) {
+	args := []string{"--json", "list-panes"}
+	if workspaceRef != "" {
+		args = append(args, "--workspace", workspaceRef)
+	}
+
+	var resp PaneListResponse
+	if err := c.runJSON(&resp, args...); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *CLIClient) RemoteStatus(workspaceID string) (*RemoteStatusPayload, error) {
 	var resp struct {
 		Remote RemoteStatusPayload `json:"remote"`

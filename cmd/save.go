@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/drolosoft/cmux-resurrect/internal/model"
 	"github.com/drolosoft/cmux-resurrect/internal/orchestrate"
 	"github.com/spf13/cobra"
 )
@@ -61,11 +62,44 @@ func runSave(cmd *cobra.Command, args []string) error {
 			padTitle(ws.Title),
 			dimStyle.Render(panes),
 			pin)
+		if ws.Remote != nil && ws.Remote.Enabled {
+			target := ws.Remote.Destination
+			if ws.Remote.Port > 0 {
+				target = fmt.Sprintf("%s:%d", target, ws.Remote.Port)
+			}
+			fmt.Fprintf(os.Stderr, "      %s\n", dimStyle.Render("remote cmux_ssh "+target))
+			if !ws.Remote.CaptureComplete && ws.Remote.Warning != "" {
+				fmt.Fprintf(os.Stderr, "      %s\n", yellowStyle.Render(ws.Remote.Warning))
+			}
+		}
 	}
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "%s\n",
 		greenStyle.Render(fmt.Sprintf("✅ Saved %d %s to %s", len(layout.Workspaces), unitName(len(layout.Workspaces)), store.Path(name))))
+	remoteTotal, remoteIncomplete := countRemoteWorkspaces(layout.Workspaces)
+	if remoteTotal > 0 {
+		msg := fmt.Sprintf("Captured remote SSH metadata for %d %s", remoteTotal, unitName(remoteTotal))
+		if remoteIncomplete > 0 {
+			msg += fmt.Sprintf("; %d need identity_file/ssh_option fields for exact replay", remoteIncomplete)
+		}
+		fmt.Fprintf(os.Stderr, "%s\n", dimStyle.Render(msg))
+	}
 	fmt.Fprintln(os.Stderr)
 	return nil
+}
+
+func countRemoteWorkspaces(workspaces []model.Workspace) (int, int) {
+	total := 0
+	incomplete := 0
+	for _, ws := range workspaces {
+		if ws.Remote == nil || !ws.Remote.Enabled {
+			continue
+		}
+		total++
+		if !ws.Remote.CaptureComplete {
+			incomplete++
+		}
+	}
+	return total, incomplete
 }

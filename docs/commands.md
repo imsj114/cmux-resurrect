@@ -46,6 +46,29 @@ crex watch --stop                                       # ⏱️ stop the daemon
 crex watch --shell-hook                                 # ⏱️ print auto-start snippet for your shell
 ```
 
+## Remote SSH Layouts
+
+When saving from cmux, crex detects workspaces created with `cmux ssh ...` and stores safe replay metadata in the layout TOML. Restore recreates those workspaces through `cmux ssh` so remote terminal splits and browser panes keep cmux's remote proxy behavior.
+
+cmux does not expose raw identity paths or SSH options through `workspace.list` or `workspace.remote.status`. If a saved workspace says the capture is incomplete, add the hidden replay fields manually:
+
+```toml
+[[workspace]]
+title = 'gpu-box'
+cwd = '/home/dev/project'
+
+[workspace.remote]
+enabled = true
+provider = 'cmux_ssh'
+destination = 'dev@gpu-box'
+port = 2222
+identity_file = '~/.ssh/id_ed25519'
+ssh_option = ['StrictHostKeyChecking=accept-new']
+capture_complete = true
+```
+
+Do not add relay ports, relay IDs, startup script paths, or proxy endpoints to the layout. cmux regenerates those per restored SSH session.
+
 ## Template Commands
 
 The `template` command group (alias: `tpl`) lets you browse and use the built-in gallery.

@@ -69,6 +69,20 @@ func runShow(cmd *cobra.Command, args []string) error {
 
 		// CWD
 		fmt.Fprintf(os.Stderr, "   %s\n", dimStyle.Render("cwd "+ws.CWD))
+		if ws.Remote != nil && ws.Remote.Enabled {
+			target := ws.Remote.Destination
+			if ws.Remote.Port > 0 {
+				target = fmt.Sprintf("%s:%d", target, ws.Remote.Port)
+			}
+			status := "complete"
+			if !ws.Remote.CaptureComplete {
+				status = "needs replay fields"
+			}
+			fmt.Fprintf(os.Stderr, "   %s\n", dimStyle.Render(fmt.Sprintf("remote %s %s (%s)", ws.Remote.Provider, target, status)))
+			if ws.Remote.Warning != "" {
+				fmt.Fprintf(os.Stderr, "   %s\n", yellowStyle.Render(ws.Remote.Warning))
+			}
+		}
 
 		// Panes as a tree
 		for i, p := range ws.Panes {
@@ -98,6 +112,20 @@ func runShow(cmd *cobra.Command, args []string) error {
 			}
 
 			fmt.Fprintf(os.Stderr, "   %s %s\n", prefix, desc)
+			for _, surface := range p.Surfaces {
+				if surface.URL == "" && surface.Command == "" {
+					continue
+				}
+				label := surface.Type
+				if label == "" {
+					label = "terminal"
+				}
+				value := surface.Command
+				if surface.URL != "" {
+					value = surface.URL
+				}
+				fmt.Fprintf(os.Stderr, "   %s   %s\n", dimStyle.Render("│"), dimStyle.Render(label+" "+value))
+			}
 		}
 		fmt.Fprintln(os.Stderr)
 	}

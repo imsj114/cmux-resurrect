@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/drolosoft/cmux-resurrect/internal/client"
@@ -15,6 +16,12 @@ import (
 type Saver struct {
 	Client client.Backend
 	Store  persist.Store
+}
+
+type workspaceMetadataIndex struct {
+	byID    map[string]client.WorkspaceRow
+	byRef   map[string]client.WorkspaceRow
+	byTitle map[string]client.WorkspaceRow
 }
 
 // Save captures the live cmux state and writes it to the store.
@@ -38,8 +45,10 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 		SavedAt:     time.Now().UTC(),
 	}
 
+	metadata := s.workspaceMetadata()
 	for _, tw := range win.Workspaces {
-		ws, err := s.buildWorkspace(tw)
+		row, hasRow := metadata.find(tw)
+		ws, err := s.buildWorkspace(tw, row, hasRow)
 		if err != nil {
 			// Log but don't fail — isolate errors per workspace.
 			fmt.Fprintf(os.Stderr, "  warning: workspace %q: %v\n", tw.Title, err)
@@ -63,19 +72,74 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 	return layout, nil
 }
 
-func (s *Saver) buildWorkspace(tw client.TreeWorkspace) (*model.Workspace, error) {
+func (s *Saver) workspaceMetadata() workspaceMetadataIndex {
+	idx := workspaceMetadataIndex{
+		byID:    make(map[string]client.WorkspaceRow),
+		byRef:   make(map[string]client.WorkspaceRow),
+		byTitle: make(map[string]client.WorkspaceRow),
+	}
+	remoteClient, ok := s.Client.(client.CmuxRemoteBackend)
+	if !ok {
+		return idx
+	}
+	resp, err := remoteClient.WorkspaceListJSON()
+	if err != nil || resp == nil {
+		return idx
+	}
+	for _, row := range resp.Workspaces {
+		if row.ID != "" {
+			idx.byID[row.ID] = row
+		}
+		if row.Ref != "" {
+			idx.byRef[row.Ref] = row
+		}
+		if row.Title != "" {
+			idx.byTitle[row.Title] = row
+		}
+	}
+	return idx
+}
+
+func (idx workspaceMetadataIndex) find(tw client.TreeWorkspace) (client.WorkspaceRow, bool) {
+	if tw.ID != "" {
+		if row, ok := idx.byID[tw.ID]; ok {
+			return row, true
+		}
+	}
+	if tw.Ref != "" {
+		if row, ok := idx.byRef[tw.Ref]; ok {
+			return row, true
+		}
+	}
+	if tw.Title != "" {
+		if row, ok := idx.byTitle[tw.Title]; ok {
+			return row, true
+		}
+	}
+	return client.WorkspaceRow{}, false
+}
+
+func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool) (*model.Workspace, error) {
 	// Get CWD from sidebar-state.
 	sidebar, err := s.Client.SidebarState(tw.Ref)
 	if err != nil {
 		return nil, fmt.Errorf("sidebar-state: %w", err)
 	}
 
+	cwd := sidebar.CWD
+	if hasRow && strings.TrimSpace(row.CurrentDirectory) != "" {
+		cwd = row.CurrentDirectory
+	}
+
 	ws := &model.Workspace{
 		Title:  tw.Title,
-		CWD:    sidebar.CWD,
+		CWD:    cwd,
 		Pinned: tw.Pinned,
 		Index:  tw.Index,
 		Active: tw.Active || tw.Selected,
+	}
+	if hasRow && row.Remote.Enabled {
+		ws.Remote = remoteWorkspaceFromStatus(row.Remote)
 	}
 
 	// Sort panes by index.
@@ -97,14 +161,8 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace) (*model.Workspace, error
 			pane.Split = "right"
 		}
 
-		// Use surface info for type and URL.
-		if len(tp.Surfaces) > 0 {
-			surf := tp.Surfaces[0]
-			pane.Type = surf.Type
-			if surf.URL != nil {
-				pane.URL = *surf.URL
-			}
-		}
+		pane.Surfaces = buildSurfaces(tp)
+		mirrorSelectedSurface(&pane, tp)
 
 		ws.Panes = append(ws.Panes, pane)
 	}
@@ -115,6 +173,95 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace) (*model.Workspace, error
 	}
 
 	return ws, nil
+}
+
+func remoteWorkspaceFromStatus(status client.RemoteStatusPayload) *model.RemoteWorkspace {
+	remote := &model.RemoteWorkspace{
+		Enabled:         true,
+		Provider:        "cmux_ssh",
+		Destination:     status.Destination,
+		HasIdentityFile: status.HasIdentityFile,
+		HasSSHOptions:   status.HasSSHOptions,
+		CaptureComplete: true,
+	}
+	if status.Port != nil {
+		remote.Port = *status.Port
+	}
+	finalizeRemoteReplay(remote)
+	return remote
+}
+
+func buildSurfaces(tp client.TreePane) []model.Surface {
+	surfaces := make([]client.TreeSurface, len(tp.Surfaces))
+	copy(surfaces, tp.Surfaces)
+	sort.Slice(surfaces, func(i, j int) bool {
+		left := surfaces[i].IndexInPane
+		right := surfaces[j].IndexInPane
+		if left == right {
+			return surfaces[i].Index < surfaces[j].Index
+		}
+		return left < right
+	})
+
+	result := make([]model.Surface, 0, len(surfaces))
+	for _, surf := range surfaces {
+		item := model.Surface{
+			Type:     surfaceType(surf.Type),
+			Title:    surf.Title,
+			Index:    surf.IndexInPane,
+			Selected: surf.Selected || surf.SelectedInPane || surf.Ref == tp.SelectedSurfaceRef,
+		}
+		if surf.URL != nil {
+			item.URL = *surf.URL
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func mirrorSelectedSurface(pane *model.Pane, tp client.TreePane) {
+	if len(pane.Surfaces) == 0 {
+		return
+	}
+	selected := pane.Surfaces[0]
+	for _, surf := range pane.Surfaces {
+		if surf.Selected {
+			selected = surf
+			break
+		}
+	}
+	pane.Type = surfaceType(selected.Type)
+	pane.URL = selected.URL
+	pane.Command = selected.Command
+}
+
+func surfaceType(typ string) string {
+	if strings.TrimSpace(typ) == "" {
+		return "terminal"
+	}
+	return typ
+}
+
+func finalizeRemoteReplay(remote *model.RemoteWorkspace) {
+	if remote == nil {
+		return
+	}
+	complete := true
+	var missing []string
+	if remote.HasIdentityFile && strings.TrimSpace(remote.IdentityFile) == "" {
+		complete = false
+		missing = append(missing, "identity_file")
+	}
+	if remote.HasSSHOptions && len(remote.SSHOptions) == 0 {
+		complete = false
+		missing = append(missing, "ssh_option")
+	}
+	remote.CaptureComplete = complete
+	if complete {
+		remote.Warning = ""
+		return
+	}
+	remote.Warning = "cmux hides " + strings.Join(missing, " and ") + "; add replay fields manually for exact restore"
 }
 
 // mergeUserEdits preserves user-edited fields from an existing TOML.
@@ -141,6 +288,18 @@ func mergeUserEdits(live, existing *model.Layout) {
 		if lw.Description == "" && ew.Description != "" {
 			lw.Description = ew.Description
 		}
+		if lw.Remote != nil && ew.Remote != nil {
+			if lw.Remote.IdentityFile == "" {
+				lw.Remote.IdentityFile = ew.Remote.IdentityFile
+			}
+			if len(lw.Remote.SSHOptions) == 0 && len(ew.Remote.SSHOptions) > 0 {
+				lw.Remote.SSHOptions = append([]string(nil), ew.Remote.SSHOptions...)
+			}
+			if lw.Remote.Warning == "" && ew.Remote.Warning != "" {
+				lw.Remote.Warning = ew.Remote.Warning
+			}
+			finalizeRemoteReplay(lw.Remote)
+		}
 		// Merge pane-level user edits.
 		for j := range lw.Panes {
 			if j >= len(ew.Panes) {
@@ -155,6 +314,46 @@ func mergeUserEdits(live, existing *model.Layout) {
 			// Preserve user-set command.
 			if ep.Command != "" {
 				lp.Command = ep.Command
+				if !hasSurfaceCommand(ep) {
+					setSelectedSurfaceCommand(lp, ep.Command)
+				}
+			}
+			mergeSurfaceCommands(lp, ep)
+		}
+	}
+}
+
+func hasSurfaceCommand(pane *model.Pane) bool {
+	for _, surface := range pane.Surfaces {
+		if surface.Command != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func setSelectedSurfaceCommand(pane *model.Pane, command string) {
+	if len(pane.Surfaces) == 0 {
+		return
+	}
+	for i := range pane.Surfaces {
+		if pane.Surfaces[i].Selected {
+			pane.Surfaces[i].Command = command
+			return
+		}
+	}
+	pane.Surfaces[0].Command = command
+}
+
+func mergeSurfaceCommands(live, existing *model.Pane) {
+	for i := range live.Surfaces {
+		if i >= len(existing.Surfaces) {
+			break
+		}
+		if existing.Surfaces[i].Command != "" {
+			live.Surfaces[i].Command = existing.Surfaces[i].Command
+			if live.Surfaces[i].Selected {
+				live.Command = existing.Surfaces[i].Command
 			}
 		}
 	}

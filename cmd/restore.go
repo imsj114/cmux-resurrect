@@ -157,6 +157,13 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "%s\n\n",
 		greenStyle.Render(fmt.Sprintf("✅ Restored %d/%d %s", result.WorkspacesOK, result.WorkspacesTotal, unitName(result.WorkspacesTotal))))
+	if len(result.Warnings) > 0 {
+		fmt.Fprintf(os.Stderr, "%s\n", yellowStyle.Render("⚠️  Warnings:"))
+		for _, w := range result.Warnings {
+			fmt.Fprintf(os.Stderr, "  %s\n", dimStyle.Render("• "+w))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
 	if len(result.Errors) > 0 {
 		fmt.Fprintf(os.Stderr, "%s\n", yellowStyle.Render("⚠️  Errors:"))
 		for _, e := range result.Errors {

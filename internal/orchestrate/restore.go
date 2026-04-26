@@ -3,6 +3,7 @@ package orchestrate
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/drolosoft/cmux-resurrect/internal/client"
@@ -34,6 +35,7 @@ type RestoreResult struct {
 	WorkspacesOK     int
 	WorkspacesClosed int
 	Errors           []string
+	Warnings         []string
 	DryRun           bool
 	Commands         []string // populated in dry-run mode
 }
@@ -63,7 +65,7 @@ func (r *Restorer) Restore(name string, dryRun bool, mode RestoreMode) (*Restore
 	var oldRefs []string
 	existingTitles := make(map[string]bool)
 	if !dryRun {
-		if tree, err := r.Client.Tree(); err == nil && tree.Caller != nil {
+		if tree, err := r.Client.Tree(); err == nil && tree != nil && tree.Caller != nil {
 			callerRef = tree.Caller.WorkspaceRef
 			// Find the caller's title from the tree.
 			for _, w := range tree.Windows {
@@ -163,9 +165,9 @@ func (r *Restorer) restoreWorkspace(ws model.Workspace, dryRun bool, result *Res
 	}
 
 	// 1. Create workspace.
-	ref, err := r.Client.NewWorkspace(client.NewWorkspaceOpts{CWD: ws.CWD})
+	ref, workspaceID, err := r.createWorkspace(ws, result)
 	if err != nil {
-		return "", fmt.Errorf("new-workspace: %w", err)
+		return "", err
 	}
 
 	// Small delay after creation.
@@ -178,47 +180,11 @@ func (r *Restorer) restoreWorkspace(ws model.Workspace, dryRun bool, result *Res
 	}
 	time.Sleep(DelayAfterSelect)
 
-	// 3. Create additional panes (splits) and send commands.
-	for i, pane := range ws.Panes {
-		if i == 0 {
-			// First pane is the default one created with the workspace.
-			if pane.Command != "" {
-				if err := r.Client.Send(ref, "", pane.Command+"\\n"); err != nil {
-					result.Errors = append(result.Errors, fmt.Sprintf("  pane %d send command: %v", i, err))
-				}
-			}
-			continue
-		}
-
-		// Focus a specific pane before splitting (for quad, etc.)
-		if pane.FocusTarget >= 0 {
-			targetRef := fmt.Sprintf("pane:%d", pane.FocusTarget)
-			if err := r.Client.FocusPane(targetRef, ref); err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("  pane %d focus target: %v", i, err))
-			}
-			time.Sleep(DelayAfterSelect)
-		}
-
-		direction := pane.Split
-		if direction == "" {
-			direction = "right"
-		}
-		surfaceRef, err := r.Client.NewSplit(direction, ref)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("  pane %d split: %v", i, err))
-			continue
-		}
-
-		// Wait for the shell in the new pane to fully initialize.
-		time.Sleep(DelayAfterSplit)
-
-		if pane.Command != "" {
-			// Send to the specific surface — without --surface, cmux defaults to pane 0.
-			if err := r.Client.Send(ref, surfaceRef, pane.Command+"\\n"); err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("  pane %d send command: %v", i, err))
-			}
-		}
+	// 3. Create additional panes/surfaces and send commands.
+	if isRemoteWorkspace(ws) && hasBrowserSurface(ws) {
+		r.waitForRemoteProxy(workspaceID, ws.Title, result)
 	}
+	r.restorePanes(ref, ws, result)
 
 	// 4. Focus the right pane.
 	for _, pane := range ws.Panes {
@@ -246,19 +212,369 @@ func (r *Restorer) restoreWorkspace(ws model.Workspace, dryRun bool, result *Res
 	return ref, nil
 }
 
+func (r *Restorer) createWorkspace(ws model.Workspace, result *RestoreResult) (string, string, error) {
+	if isRemoteWorkspace(ws) {
+		remoteClient, ok := r.Client.(client.CmuxRemoteBackend)
+		if !ok {
+			return "", "", fmt.Errorf("remote workspace restore requires cmux backend")
+		}
+		if strings.TrimSpace(ws.Remote.Destination) == "" {
+			return "", "", fmt.Errorf("remote workspace missing destination")
+		}
+		if !ws.Remote.CaptureComplete {
+			r.warn(result, fmt.Sprintf("workspace %q: %s", ws.Title, ws.Remote.Warning))
+		}
+		ref, workspaceID, err := remoteClient.NewRemoteWorkspace(client.RemoteSSHOpts{
+			Destination:  ws.Remote.Destination,
+			Name:         ws.Title,
+			Port:         ws.Remote.Port,
+			IdentityFile: ws.Remote.IdentityFile,
+			SSHOptions:   ws.Remote.SSHOptions,
+			NoFocus:      true,
+		})
+		if err != nil {
+			return "", "", fmt.Errorf("cmux ssh: %w", err)
+		}
+		return ref, workspaceID, nil
+	}
+
+	ref, err := r.Client.NewWorkspace(client.NewWorkspaceOpts{CWD: ws.CWD})
+	if err != nil {
+		return "", "", fmt.Errorf("new-workspace: %w", err)
+	}
+	return ref, "", nil
+}
+
+func isRemoteWorkspace(ws model.Workspace) bool {
+	return ws.Remote != nil && ws.Remote.Enabled && ws.Remote.Provider == "cmux_ssh"
+}
+
+func hasBrowserSurface(ws model.Workspace) bool {
+	for _, pane := range ws.Panes {
+		for _, surface := range paneSurfaces(pane) {
+			if surface.Type == "browser" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *Restorer) waitForRemoteProxy(workspaceID, title string, result *RestoreResult) {
+	remoteClient, ok := r.Client.(client.CmuxRemoteBackend)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(workspaceID) == "" {
+		r.warn(result, fmt.Sprintf("workspace %q: remote proxy status unavailable before browser restore", title))
+		return
+	}
+
+	deadline := time.Now().Add(RemoteProxyReadyDeadline)
+	var last *client.RemoteStatusPayload
+	for {
+		status, err := remoteClient.RemoteStatus(workspaceID)
+		if err == nil && status != nil {
+			last = status
+			if remoteProxyUsable(status) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(client.PollInterval)
+	}
+
+	state := "unknown"
+	proxyState := "unknown"
+	if last != nil {
+		if last.State != "" {
+			state = last.State
+		}
+		if last.Proxy.State != "" {
+			proxyState = last.Proxy.State
+		}
+	}
+	r.warn(result, fmt.Sprintf("workspace %q: remote proxy not ready before browser restore (remote=%s proxy=%s)", title, state, proxyState))
+}
+
+func remoteProxyUsable(status *client.RemoteStatusPayload) bool {
+	if status == nil {
+		return false
+	}
+	remoteOK := status.State == "connected" || status.State == "connecting"
+	proxyOK := status.Proxy.State == "ready" || status.Proxy.State == "connecting"
+	return remoteOK && proxyOK
+}
+
+func (r *Restorer) restorePanes(workspaceRef string, ws model.Workspace, result *RestoreResult) {
+	paneRefs := make(map[int]string)
+	for i, pane := range ws.Panes {
+		if i == 0 {
+			paneRefs[pane.Index] = r.paneRefByIndex(workspaceRef, pane.Index)
+			r.restoreDefaultPaneSurfaces(workspaceRef, paneRefs[pane.Index], pane, result)
+			continue
+		}
+
+		if pane.FocusTarget >= 0 {
+			targetRef := paneRefs[pane.FocusTarget]
+			if targetRef == "" {
+				targetRef = fmt.Sprintf("pane:%d", pane.FocusTarget)
+			}
+			if err := r.Client.FocusPane(targetRef, workspaceRef); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("  pane %d focus target: %v", i, err))
+			}
+			time.Sleep(DelayAfterSelect)
+		}
+
+		surfaceRef, paneRef := r.restoreNewPane(workspaceRef, pane, result)
+		if paneRef == "" && surfaceRef != "" {
+			paneRef = r.paneRefForSurface(workspaceRef, surfaceRef)
+		}
+		if paneRef == "" {
+			paneRef = fmt.Sprintf("pane:%d", pane.Index)
+		}
+		paneRefs[pane.Index] = paneRef
+	}
+}
+
+func (r *Restorer) restoreDefaultPaneSurfaces(workspaceRef, paneRef string, pane model.Pane, result *RestoreResult) {
+	surfaces := paneSurfaces(pane)
+	if len(surfaces) == 0 {
+		return
+	}
+	first := surfaces[0]
+	if first.Type == "browser" {
+		r.warn(result, fmt.Sprintf("  pane %d: first browser surface restored as an additional pane because workspaces start with a terminal", pane.Index))
+		r.createPaneSurface(workspaceRef, client.PaneCreateOpts{
+			WorkspaceRef: workspaceRef,
+			Direction:    defaultDirection(pane.Split),
+			Type:         "browser",
+			URL:          first.URL,
+		}, result)
+	} else if first.Command != "" {
+		if err := r.Client.Send(workspaceRef, "", first.Command+"\\n"); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("  pane %d send command: %v", pane.Index, err))
+		}
+	}
+	r.restoreAdditionalSurfaces(workspaceRef, paneRef, surfaces[1:], result)
+}
+
+func (r *Restorer) restoreNewPane(workspaceRef string, pane model.Pane, result *RestoreResult) (string, string) {
+	surfaces := paneSurfaces(pane)
+	if len(surfaces) == 0 {
+		surfaces = []model.Surface{{Type: "terminal"}}
+	}
+	first := surfaces[0]
+	direction := defaultDirection(pane.Split)
+
+	var surfaceRef, paneRef string
+	if first.Type == "browser" {
+		surfaceRef, paneRef = r.createPaneSurface(workspaceRef, client.PaneCreateOpts{
+			WorkspaceRef: workspaceRef,
+			Direction:    direction,
+			Type:         "browser",
+			URL:          first.URL,
+		}, result)
+	} else {
+		var err error
+		surfaceRef, err = r.Client.NewSplit(direction, workspaceRef)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("  pane %d split: %v", pane.Index, err))
+			return "", ""
+		}
+		time.Sleep(DelayAfterSplit)
+		if first.Command != "" {
+			if err := r.Client.Send(workspaceRef, surfaceRef, first.Command+"\\n"); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("  pane %d send command: %v", pane.Index, err))
+			}
+		}
+		paneRef = r.paneRefForSurface(workspaceRef, surfaceRef)
+	}
+	r.restoreAdditionalSurfaces(workspaceRef, paneRef, surfaces[1:], result)
+	return surfaceRef, paneRef
+}
+
+func (r *Restorer) createPaneSurface(workspaceRef string, opts client.PaneCreateOpts, result *RestoreResult) (string, string) {
+	remoteClient, ok := r.Client.(client.CmuxRemoteBackend)
+	if !ok {
+		result.Errors = append(result.Errors, fmt.Sprintf("  pane create %s: backend does not support pane creation", opts.Type))
+		return "", ""
+	}
+	surfaceRef, paneRef, err := remoteClient.NewPane(opts)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("  pane create %s: %v", opts.Type, err))
+		return "", ""
+	}
+	time.Sleep(DelayAfterSplit)
+	return surfaceRef, paneRef
+}
+
+func (r *Restorer) restoreAdditionalSurfaces(workspaceRef, paneRef string, surfaces []model.Surface, result *RestoreResult) {
+	if len(surfaces) == 0 {
+		return
+	}
+	remoteClient, ok := r.Client.(client.CmuxRemoteBackend)
+	if !ok {
+		result.Errors = append(result.Errors, "  additional surfaces: backend does not support surface creation")
+		return
+	}
+	if paneRef == "" {
+		result.Errors = append(result.Errors, "  additional surfaces: could not determine pane ref")
+		return
+	}
+	for _, surface := range surfaces {
+		opts := client.PaneCreateOpts{
+			WorkspaceRef: workspaceRef,
+			PaneRef:      paneRef,
+			Type:         surface.Type,
+			URL:          surface.URL,
+		}
+		surfaceRef, err := remoteClient.NewSurface(opts)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("  surface create %s: %v", surface.Type, err))
+			continue
+		}
+		time.Sleep(DelayAfterSplit)
+		if surface.Type != "browser" && surface.Command != "" {
+			if err := r.Client.Send(workspaceRef, surfaceRef, surface.Command+"\\n"); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("  surface send command: %v", err))
+			}
+		}
+	}
+}
+
+func paneSurfaces(pane model.Pane) []model.Surface {
+	if len(pane.Surfaces) > 0 {
+		result := make([]model.Surface, len(pane.Surfaces))
+		copy(result, pane.Surfaces)
+		for i := range result {
+			result[i].Type = normalizeSurfaceType(result[i].Type)
+		}
+		return result
+	}
+	return []model.Surface{{
+		Type:     normalizeSurfaceType(pane.Type),
+		URL:      pane.URL,
+		Command:  pane.Command,
+		Index:    pane.Index,
+		Selected: pane.Focus,
+	}}
+}
+
+func normalizeSurfaceType(typ string) string {
+	if strings.TrimSpace(typ) == "" {
+		return "terminal"
+	}
+	return typ
+}
+
+func defaultDirection(direction string) string {
+	if direction == "" {
+		return "right"
+	}
+	return direction
+}
+
+func (r *Restorer) paneRefByIndex(workspaceRef string, index int) string {
+	tree, err := r.Client.Tree()
+	if err != nil {
+		return fmt.Sprintf("pane:%d", index)
+	}
+	for _, w := range tree.Windows {
+		for _, ws := range w.Workspaces {
+			if ws.Ref != workspaceRef && ws.ID != workspaceRef {
+				continue
+			}
+			for _, pane := range ws.Panes {
+				if pane.Index == index && pane.Ref != "" {
+					return pane.Ref
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("pane:%d", index)
+}
+
+func (r *Restorer) paneRefForSurface(workspaceRef, surfaceRef string) string {
+	tree, err := r.Client.Tree()
+	if err != nil {
+		return ""
+	}
+	for _, w := range tree.Windows {
+		for _, ws := range w.Workspaces {
+			if ws.Ref != workspaceRef && ws.ID != workspaceRef {
+				continue
+			}
+			for _, pane := range ws.Panes {
+				for _, surface := range pane.Surfaces {
+					if surface.Ref == surfaceRef || surface.ID == surfaceRef {
+						return pane.Ref
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (r *Restorer) warn(result *RestoreResult, warning string) {
+	if warning == "" {
+		return
+	}
+	result.Warnings = append(result.Warnings, warning)
+}
+
 func (r *Restorer) dryRunWorkspace(ws model.Workspace, result *RestoreResult) (string, error) {
 	ref := fmt.Sprintf("workspace:new_%d", ws.Index)
 	f := r.Client.DryRunFormatter()
 
 	result.Commands = append(result.Commands, "")
 	result.Commands = append(result.Commands, fmt.Sprintf("# %s", ws.Title))
-	result.Commands = append(result.Commands, f.FmtNewWorkspace(ws.CWD))
+	if isRemoteWorkspace(ws) {
+		if !ws.Remote.CaptureComplete {
+			result.Commands = append(result.Commands, "# warning: "+ws.Remote.Warning)
+		}
+		result.Commands = append(result.Commands, f.FmtNewRemoteWorkspace(client.RemoteSSHOpts{
+			Destination:  ws.Remote.Destination,
+			Name:         ws.Title,
+			Port:         ws.Remote.Port,
+			IdentityFile: ws.Remote.IdentityFile,
+			SSHOptions:   ws.Remote.SSHOptions,
+			NoFocus:      true,
+		}))
+	} else {
+		result.Commands = append(result.Commands, f.FmtNewWorkspace(ws.CWD))
+	}
 	result.Commands = append(result.Commands, f.FmtRenameWorkspace(ref, ws.Title))
 
 	for i, pane := range ws.Panes {
+		surfaces := paneSurfaces(pane)
 		if i == 0 {
-			if pane.Command != "" {
-				result.Commands = append(result.Commands, f.FmtSend(ref, pane.Command))
+			if len(surfaces) > 0 {
+				if surfaces[0].Type == "browser" {
+					result.Commands = append(result.Commands, fmt.Sprintf("# warning: pane %d first browser surface restores as an additional pane", pane.Index))
+					result.Commands = append(result.Commands, f.FmtNewPane(client.PaneCreateOpts{
+						WorkspaceRef: ref,
+						Direction:    defaultDirection(pane.Split),
+						Type:         "browser",
+						URL:          surfaces[0].URL,
+					}))
+				} else if surfaces[0].Command != "" {
+					result.Commands = append(result.Commands, f.FmtSend(ref, surfaces[0].Command))
+				}
+			}
+			for _, surface := range surfaces[1:] {
+				result.Commands = append(result.Commands, f.FmtNewSurface(client.PaneCreateOpts{
+					WorkspaceRef: ref,
+					PaneRef:      fmt.Sprintf("pane:%d", pane.Index),
+					Type:         surface.Type,
+					URL:          surface.URL,
+				}))
+				if surface.Type != "browser" && surface.Command != "" {
+					result.Commands = append(result.Commands, f.FmtSend(ref, surface.Command))
+				}
 			}
 			continue
 		}
@@ -266,13 +582,34 @@ func (r *Restorer) dryRunWorkspace(ws model.Workspace, result *RestoreResult) (s
 			result.Commands = append(result.Commands,
 				f.FmtFocusPane(fmt.Sprintf("pane:%d", pane.FocusTarget), ref))
 		}
-		direction := pane.Split
-		if direction == "" {
-			direction = "right"
+		direction := defaultDirection(pane.Split)
+		first := model.Surface{Type: "terminal"}
+		if len(surfaces) > 0 {
+			first = surfaces[0]
 		}
-		result.Commands = append(result.Commands, f.FmtNewSplit(direction, ref))
-		if pane.Command != "" {
-			result.Commands = append(result.Commands, f.FmtSend(ref, pane.Command))
+		if first.Type == "browser" {
+			result.Commands = append(result.Commands, f.FmtNewPane(client.PaneCreateOpts{
+				WorkspaceRef: ref,
+				Direction:    direction,
+				Type:         first.Type,
+				URL:          first.URL,
+			}))
+		} else {
+			result.Commands = append(result.Commands, f.FmtNewSplit(direction, ref))
+			if first.Command != "" {
+				result.Commands = append(result.Commands, f.FmtSend(ref, first.Command))
+			}
+		}
+		for _, surface := range surfaces[1:] {
+			result.Commands = append(result.Commands, f.FmtNewSurface(client.PaneCreateOpts{
+				WorkspaceRef: ref,
+				PaneRef:      fmt.Sprintf("pane:%d", pane.Index),
+				Type:         surface.Type,
+				URL:          surface.URL,
+			}))
+			if surface.Type != "browser" && surface.Command != "" {
+				result.Commands = append(result.Commands, f.FmtSend(ref, surface.Command))
+			}
 		}
 	}
 

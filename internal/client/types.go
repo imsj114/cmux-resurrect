@@ -18,6 +18,7 @@ type CallerInfo struct {
 
 // TreeWindow represents a cmux window.
 type TreeWindow struct {
+	ID                   string          `json:"id"`
 	Ref                  string          `json:"ref"`
 	Index                int             `json:"index"`
 	Active               bool            `json:"active"`
@@ -30,6 +31,7 @@ type TreeWindow struct {
 
 // TreeWorkspace represents a cmux workspace in the tree.
 type TreeWorkspace struct {
+	ID       string     `json:"id"`
 	Ref      string     `json:"ref"`
 	Title    string     `json:"title"`
 	Index    int        `json:"index"`
@@ -41,6 +43,7 @@ type TreeWorkspace struct {
 
 // TreePane represents a pane in the tree.
 type TreePane struct {
+	ID                 string        `json:"id"`
 	Ref                string        `json:"ref"`
 	Index              int           `json:"index"`
 	Active             bool          `json:"active"`
@@ -53,6 +56,7 @@ type TreePane struct {
 
 // TreeSurface represents a surface (terminal or browser) in a pane.
 type TreeSurface struct {
+	ID             string  `json:"id"`
 	Ref            string  `json:"ref"`
 	PaneRef        string  `json:"pane_ref"`
 	Type           string  `json:"type"`
@@ -86,4 +90,68 @@ type WorkspaceInfo struct {
 type NewWorkspaceOpts struct {
 	CWD     string
 	Command string
+}
+
+// WorkspaceListResponse is the structured response from cmux workspace.list.
+type WorkspaceListResponse struct {
+	WindowID   string         `json:"window_id"`
+	WindowRef  string         `json:"window_ref"`
+	Workspaces []WorkspaceRow `json:"workspaces"`
+}
+
+// WorkspaceRow contains summary metadata for one cmux workspace.
+type WorkspaceRow struct {
+	ID               string              `json:"id"`
+	Ref              string              `json:"ref"`
+	Title            string              `json:"title"`
+	Description      string              `json:"description"`
+	Index            int                 `json:"index"`
+	Selected         bool                `json:"selected"`
+	Pinned           bool                `json:"pinned"`
+	CurrentDirectory string              `json:"current_directory"`
+	Remote           RemoteStatusPayload `json:"remote"`
+}
+
+// RemoteStatusPayload is cmux's safe remote workspace status payload.
+type RemoteStatusPayload struct {
+	Enabled         bool               `json:"enabled"`
+	State           string             `json:"state"`
+	Destination     string             `json:"destination"`
+	Port            *int               `json:"port"`
+	HasIdentityFile bool               `json:"has_identity_file"`
+	HasSSHOptions   bool               `json:"has_ssh_options"`
+	Proxy           RemoteProxyPayload `json:"proxy"`
+}
+
+// RemoteProxyPayload is the safe proxy subset in a remote status payload.
+type RemoteProxyPayload struct {
+	State string `json:"state"`
+}
+
+// RemoteSSHOpts describes a cmux ssh workspace to create.
+type RemoteSSHOpts struct {
+	Destination  string
+	Name         string
+	Port         int
+	IdentityFile string
+	SSHOptions   []string
+	NoFocus      bool
+}
+
+// PaneCreateOpts describes a pane or surface to create in cmux.
+type PaneCreateOpts struct {
+	WorkspaceRef string
+	PaneRef      string
+	Direction    string
+	Type         string
+	URL          string
+}
+
+// CmuxRemoteBackend exposes cmux-only APIs without extending generic backends.
+type CmuxRemoteBackend interface {
+	WorkspaceListJSON() (*WorkspaceListResponse, error)
+	RemoteStatus(workspaceID string) (*RemoteStatusPayload, error)
+	NewRemoteWorkspace(opts RemoteSSHOpts) (workspaceRef string, workspaceID string, err error)
+	NewPane(opts PaneCreateOpts) (surfaceRef string, paneRef string, err error)
+	NewSurface(opts PaneCreateOpts) (surfaceRef string, err error)
 }

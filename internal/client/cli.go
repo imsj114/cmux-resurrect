@@ -34,6 +34,29 @@ func (c *CLIClient) run(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+func (c *CLIClient) runJSON(out any, args ...string) error {
+	raw, err := c.run(args...)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return fmt.Errorf("parse cmux JSON: %w\n%s", err, raw)
+	}
+	return nil
+}
+
+func (c *CLIClient) rpc(method string, params any, out any) error {
+	args := []string{"rpc", method}
+	if params != nil {
+		data, err := json.Marshal(params)
+		if err != nil {
+			return fmt.Errorf("marshal rpc params: %w", err)
+		}
+		args = append(args, string(data))
+	}
+	return c.runJSON(out, args...)
+}
+
 func (c *CLIClient) Ping() error {
 	_, err := c.run("ping")
 	return err
@@ -213,4 +236,130 @@ func (c *CLIClient) Send(workspaceRef, surfaceRef, text string) error {
 	args = append(args, text)
 	_, err := c.run(args...)
 	return err
+}
+
+func (c *CLIClient) WorkspaceListJSON() (*WorkspaceListResponse, error) {
+	var resp WorkspaceListResponse
+	if err := c.rpc("workspace.list", map[string]any{}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *CLIClient) RemoteStatus(workspaceID string) (*RemoteStatusPayload, error) {
+	var resp struct {
+		Remote RemoteStatusPayload `json:"remote"`
+	}
+	if err := c.rpc("workspace.remote.status", map[string]any{"workspace_id": workspaceID}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Remote, nil
+}
+
+func (c *CLIClient) NewRemoteWorkspace(opts RemoteSSHOpts) (string, string, error) {
+	args := []string{"--json", "ssh", opts.Destination}
+	if opts.Name != "" {
+		args = append(args, "--name", opts.Name)
+	}
+	if opts.Port > 0 {
+		args = append(args, "--port", fmt.Sprintf("%d", opts.Port))
+	}
+	if opts.IdentityFile != "" {
+		args = append(args, "--identity", opts.IdentityFile)
+	}
+	for _, opt := range opts.SSHOptions {
+		if strings.TrimSpace(opt) == "" {
+			continue
+		}
+		args = append(args, "--ssh-option", opt)
+	}
+	if opts.NoFocus {
+		args = append(args, "--no-focus")
+	}
+
+	var resp struct {
+		WorkspaceID  string `json:"workspace_id"`
+		WorkspaceRef string `json:"workspace_ref"`
+	}
+	if err := c.runJSON(&resp, args...); err != nil {
+		return "", "", err
+	}
+	ref := resp.WorkspaceRef
+	if ref == "" {
+		ref = resp.WorkspaceID
+	}
+	if ref == "" {
+		return "", "", fmt.Errorf("cmux ssh created workspace but returned no workspace ref")
+	}
+	return ref, resp.WorkspaceID, nil
+}
+
+func (c *CLIClient) NewPane(opts PaneCreateOpts) (string, string, error) {
+	args := []string{"--json", "new-pane"}
+	if opts.Type != "" {
+		args = append(args, "--type", opts.Type)
+	}
+	if opts.Direction != "" {
+		args = append(args, "--direction", opts.Direction)
+	}
+	if opts.WorkspaceRef != "" {
+		args = append(args, "--workspace", opts.WorkspaceRef)
+	}
+	if opts.URL != "" {
+		args = append(args, "--url", opts.URL)
+	}
+
+	var resp struct {
+		SurfaceID  string `json:"surface_id"`
+		SurfaceRef string `json:"surface_ref"`
+		PaneID     string `json:"pane_id"`
+		PaneRef    string `json:"pane_ref"`
+	}
+	if err := c.runJSON(&resp, args...); err != nil {
+		return "", "", err
+	}
+	surfaceRef := resp.SurfaceRef
+	if surfaceRef == "" {
+		surfaceRef = resp.SurfaceID
+	}
+	paneRef := resp.PaneRef
+	if paneRef == "" {
+		paneRef = resp.PaneID
+	}
+	if surfaceRef == "" {
+		return "", "", fmt.Errorf("new pane created but returned no surface ref")
+	}
+	return surfaceRef, paneRef, nil
+}
+
+func (c *CLIClient) NewSurface(opts PaneCreateOpts) (string, error) {
+	args := []string{"--json", "new-surface"}
+	if opts.Type != "" {
+		args = append(args, "--type", opts.Type)
+	}
+	if opts.PaneRef != "" {
+		args = append(args, "--pane", opts.PaneRef)
+	}
+	if opts.WorkspaceRef != "" {
+		args = append(args, "--workspace", opts.WorkspaceRef)
+	}
+	if opts.URL != "" {
+		args = append(args, "--url", opts.URL)
+	}
+
+	var resp struct {
+		SurfaceID  string `json:"surface_id"`
+		SurfaceRef string `json:"surface_ref"`
+	}
+	if err := c.runJSON(&resp, args...); err != nil {
+		return "", err
+	}
+	surfaceRef := resp.SurfaceRef
+	if surfaceRef == "" {
+		surfaceRef = resp.SurfaceID
+	}
+	if surfaceRef == "" {
+		return "", fmt.Errorf("new surface created but returned no surface ref")
+	}
+	return surfaceRef, nil
 }

@@ -27,4 +27,7 @@ const (
 	// Shell prompt sets the terminal title on startup; renaming too
 	// early gets overwritten.
 	DelayBeforeRename = 500 * time.Millisecond
+
+	// RemoteProxyReadyDeadline bounds waiting for cmux ssh browser proxy readiness.
+	RemoteProxyReadyDeadline = 3 * time.Second
 )

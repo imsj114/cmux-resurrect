@@ -253,6 +253,52 @@ func TestRestore_DryRunReplaysTerminalWorkingDirectories(t *testing.T) {
 	}
 }
 
+func TestRestore_DryRunPreservesTildeExpansionForRemoteCWD(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+
+	layout := &model.Layout{
+		Name:    "remote-cwd",
+		Version: 1,
+		SavedAt: time.Now().UTC(),
+		Workspaces: []model.Workspace{
+			{
+				Title: "remote",
+				CWD:   "/Users/local/project",
+				Index: 0,
+				Remote: &model.RemoteWorkspace{
+					Enabled:         true,
+					Provider:        "cmux_ssh",
+					Destination:     "home",
+					CaptureComplete: true,
+				},
+				Panes: []model.Pane{
+					{
+						Index: 0,
+						Type:  "terminal",
+						Surfaces: []model.Surface{
+							{Type: "terminal", CWD: "~/bin", Selected: true},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := store.Save("remote-cwd", layout); err != nil {
+		t.Fatalf("save layout: %v", err)
+	}
+
+	restorer := &Restorer{Client: &mockClient{}, Store: store}
+	result, err := restorer.Restore("remote-cwd", true, RestoreModeAdd)
+	if err != nil {
+		t.Fatalf("restore dry-run: %v", err)
+	}
+
+	if commandIndex(result.Commands, "cd ~/'bin'") < 0 {
+		t.Fatalf("missing tilde-preserving cwd command: %#v", result.Commands)
+	}
+}
+
 func TestRestore_DryRunResumesCodexSession(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := persist.NewFileStore(dir)

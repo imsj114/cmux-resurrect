@@ -194,7 +194,7 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 			pane.Split = "right"
 		}
 
-		pane.Surfaces = buildSurfaces(tp, terminals, agents)
+		pane.Surfaces = buildSurfaces(tp, terminals, agents, isRemoteWorkspaceModel(ws))
 		mirrorSelectedSurface(&pane, tp)
 
 		ws.Panes = append(ws.Panes, pane)
@@ -225,7 +225,7 @@ func remoteWorkspaceFromStatus(status client.RemoteStatusPayload) *model.RemoteW
 	return remote
 }
 
-func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex, agents agentSessionIndex) []model.Surface {
+func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex, agents agentSessionIndex, remote bool) []model.Surface {
 	surfaces := make([]client.TreeSurface, len(tp.Surfaces))
 	copy(surfaces, tp.Surfaces)
 	sort.Slice(surfaces, func(i, j int) bool {
@@ -249,7 +249,11 @@ func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex, agents a
 			item.URL = *surf.URL
 		}
 		if item.Type != "browser" {
-			item.CWD = terminals.cwdFor(surf)
+			if remote {
+				item.CWD = remoteCWDFromTitle(item.Title)
+			} else {
+				item.CWD = terminals.cwdFor(surf)
+			}
 			if agentRecord, ok := agents.recordFor(surf.ID); ok {
 				agent := agentRecord.agent
 				item.Agent = &agent
@@ -261,6 +265,29 @@ func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex, agents a
 		result = append(result, item)
 	}
 	return result
+}
+
+func isRemoteWorkspaceModel(ws *model.Workspace) bool {
+	return ws != nil && ws.Remote != nil && ws.Remote.Enabled
+}
+
+func remoteCWDFromTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	idx := strings.LastIndex(title, ": ")
+	if idx < 0 {
+		return ""
+	}
+	cwd := strings.TrimSpace(title[idx+2:])
+	if cwd == "" {
+		return ""
+	}
+	if strings.HasPrefix(cwd, "/") || strings.HasPrefix(cwd, "~") {
+		return cwd
+	}
+	return ""
 }
 
 func (idx terminalMetadataIndex) cwdFor(surface client.TreeSurface) string {

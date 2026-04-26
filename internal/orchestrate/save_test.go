@@ -376,6 +376,70 @@ func TestSave_CapturesTerminalSurfaceWorkingDirectories(t *testing.T) {
 	}
 }
 
+func TestSave_CapturesRemoteTerminalWorkingDirectoriesFromTitles(t *testing.T) {
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						ID:    "workspace-uuid-1",
+						Ref:   "workspace:1",
+						Title: "remote-layout",
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:0",
+								Index:              0,
+								SelectedSurfaceRef: "surface:0",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-uuid-0", Ref: "surface:0", Type: "terminal", Title: "ubuntu@ubuntu-server: ~/bin", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:1": "/Users/local/project"},
+		},
+		workspaceList: &client.WorkspaceListResponse{
+			Workspaces: []client.WorkspaceRow{
+				{
+					ID:    "workspace-uuid-1",
+					Ref:   "workspace:1",
+					Title: "remote-layout",
+					Remote: client.RemoteStatusPayload{
+						Enabled:     true,
+						Destination: "home",
+					},
+				},
+			},
+		},
+		terminalList: &client.TerminalListResponse{
+			Terminals: []client.TerminalRow{
+				{SurfaceID: "surface-uuid-0", SurfaceRef: "surface:0", CurrentDirectory: "/Users/local/project"},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("remote-cwd-layout", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	surface := layout.Workspaces[0].Panes[0].Surfaces[0]
+	if surface.CWD != "~/bin" {
+		t.Errorf("remote surface CWD = %q, want ~/bin from title", surface.CWD)
+	}
+}
+
 func TestSave_CapturesCodexAgentSession(t *testing.T) {
 	hookDir := t.TempDir()
 	t.Setenv("CMUX_AGENT_HOOK_STATE_DIR", hookDir)

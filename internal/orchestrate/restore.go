@@ -471,7 +471,7 @@ func paneSurfaces(pane model.Pane) []model.Surface {
 func terminalStartupLines(ws model.Workspace, pane model.Pane, surface model.Surface) []string {
 	var lines []string
 	if cwd := terminalSurfaceCWD(ws, pane, surface); cwd != "" {
-		lines = append(lines, "cd "+shellQuote(cwd))
+		lines = append(lines, "cd "+shellQuotePath(cwd))
 	}
 	if command := terminalSurfaceCommand(surface); command != "" {
 		lines = append(lines, command)
@@ -512,6 +512,31 @@ func shellQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func shellQuotePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "~" {
+		return "~"
+	}
+	if strings.HasPrefix(path, "~/") {
+		rest := strings.TrimPrefix(path, "~/")
+		if rest == "" {
+			return "~"
+		}
+		return "~/" + shellQuote(rest)
+	}
+	if strings.HasPrefix(path, "~") {
+		if slash := strings.Index(path, "/"); slash > 0 {
+			userPart := path[:slash]
+			rest := path[slash+1:]
+			if rest == "" {
+				return userPart
+			}
+			return userPart + "/" + shellQuote(rest)
+		}
+	}
+	return shellQuote(path)
 }
 
 func normalizeSurfaceType(typ string) string {

@@ -24,6 +24,7 @@ type mockCmuxClient struct {
 	mockClient
 	workspaceList     *client.WorkspaceListResponse
 	paneLists         map[string]*client.PaneListResponse
+	terminalList      *client.TerminalListResponse
 	remoteStatuses    []client.RemoteStatusPayload
 	remoteStatusCalls []string
 	remoteWorkspaceID string
@@ -74,6 +75,10 @@ func (m *mockCmuxClient) PaneListJSON(workspaceRef string) (*client.PaneListResp
 		return nil, nil
 	}
 	return m.paneLists[workspaceRef], nil
+}
+
+func (m *mockCmuxClient) TerminalListJSON() (*client.TerminalListResponse, error) {
+	return m.terminalList, nil
 }
 
 func (m *mockCmuxClient) RemoteStatus(workspaceID string) (*client.RemoteStatusPayload, error) {
@@ -299,6 +304,74 @@ func TestSave_CapturesPaneTopologyCreationOrder(t *testing.T) {
 	}
 	if panes[2].Split != "down" || panes[2].FocusTarget != 0 {
 		t.Errorf("pane 1 split/focus = %q/%d, want down/0", panes[2].Split, panes[2].FocusTarget)
+	}
+}
+
+func TestSave_CapturesTerminalSurfaceWorkingDirectories(t *testing.T) {
+	treeResp := &client.TreeResponse{
+		Windows: []client.TreeWindow{
+			{
+				Workspaces: []client.TreeWorkspace{
+					{
+						Ref:   "workspace:1",
+						Title: "cwd-layout",
+						Panes: []client.TreePane{
+							{
+								Ref:                "pane:0",
+								Index:              0,
+								SelectedSurfaceRef: "surface:0",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-uuid-0", Ref: "surface:0", Type: "terminal", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+							{
+								Ref:                "pane:1",
+								Index:              1,
+								SelectedSurfaceRef: "surface:1",
+								Surfaces: []client.TreeSurface{
+									{ID: "surface-uuid-1", Ref: "surface:1", Type: "terminal", IndexInPane: 0, SelectedInPane: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mc := &mockCmuxClient{
+		mockClient: mockClient{
+			treeResp:    treeResp,
+			sidebarCWDs: map[string]string{"workspace:1": "/tmp/project"},
+		},
+		terminalList: &client.TerminalListResponse{
+			Terminals: []client.TerminalRow{
+				{SurfaceID: "surface-uuid-0", SurfaceRef: "surface:0", CurrentDirectory: "/tmp/project"},
+				{SurfaceID: "surface-uuid-1", SurfaceRef: "surface:1", CurrentDirectory: "/tmp/other package"},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+	saver := &Saver{Client: mc, Store: store}
+
+	layout, err := saver.Save("cwd-layout", "")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	panes := layout.Workspaces[0].Panes
+	if got := panes[0].CWD; got != "/tmp/project" {
+		t.Errorf("pane 0 CWD = %q, want /tmp/project", got)
+	}
+	if got := panes[0].Surfaces[0].CWD; got != "/tmp/project" {
+		t.Errorf("surface 0 CWD = %q, want /tmp/project", got)
+	}
+	if got := panes[1].CWD; got != "/tmp/other package" {
+		t.Errorf("pane 1 CWD = %q, want /tmp/other package", got)
+	}
+	if got := panes[1].Surfaces[0].CWD; got != "/tmp/other package" {
+		t.Errorf("surface 1 CWD = %q, want /tmp/other package", got)
 	}
 }
 

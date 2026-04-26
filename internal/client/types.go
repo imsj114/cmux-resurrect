@@ -173,10 +173,32 @@ type PaneRow struct {
 	PixelFrame         RectFrame `json:"pixel_frame"`
 }
 
+// TerminalListResponse is the structured response from cmux debug.terminals.
+type TerminalListResponse struct {
+	Count     int           `json:"count"`
+	Terminals []TerminalRow `json:"terminals"`
+}
+
+// TerminalRow contains live terminal metadata for one surface.
+type TerminalRow struct {
+	WorkspaceID               string `json:"workspace_id"`
+	WorkspaceRef              string `json:"workspace_ref"`
+	PaneID                    string `json:"pane_id"`
+	PaneRef                   string `json:"pane_ref"`
+	SurfaceID                 string `json:"surface_id"`
+	SurfaceRef                string `json:"surface_ref"`
+	SurfaceTitle              string `json:"surface_title"`
+	SurfaceFocused            bool   `json:"surface_focused"`
+	CurrentDirectory          string `json:"current_directory"`
+	RequestedWorkingDirectory string `json:"requested_working_directory"`
+	InitialCommand            string `json:"initial_command"`
+}
+
 // CmuxRemoteBackend exposes cmux-only APIs without extending generic backends.
 type CmuxRemoteBackend interface {
 	WorkspaceListJSON() (*WorkspaceListResponse, error)
 	PaneListJSON(workspaceRef string) (*PaneListResponse, error)
+	TerminalListJSON() (*TerminalListResponse, error)
 	RemoteStatus(workspaceID string) (*RemoteStatusPayload, error)
 	NewRemoteWorkspace(opts RemoteSSHOpts) (workspaceRef string, workspaceID string, err error)
 	NewPane(opts PaneCreateOpts) (surfaceRef string, paneRef string, err error)

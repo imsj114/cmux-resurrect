@@ -197,6 +197,62 @@ func TestRestore_DryRunReplaysFocusTargetsInPaneOrder(t *testing.T) {
 	}
 }
 
+func TestRestore_DryRunReplaysTerminalWorkingDirectories(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := persist.NewFileStore(dir)
+
+	layout := &model.Layout{
+		Name:    "cwd-restore",
+		Version: 1,
+		SavedAt: time.Now().UTC(),
+		Workspaces: []model.Workspace{
+			{
+				Title: "cwd",
+				CWD:   "/tmp/project",
+				Index: 0,
+				Panes: []model.Pane{
+					{
+						Index: 0,
+						Type:  "terminal",
+						Surfaces: []model.Surface{
+							{Type: "terminal", CWD: "/tmp/project", Selected: true},
+						},
+					},
+					{
+						Index: 1,
+						Type:  "terminal",
+						Split: "right",
+						Surfaces: []model.Surface{
+							{Type: "terminal", CWD: "/tmp/other package", Command: "npm test", Selected: true},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := store.Save("cwd-restore", layout); err != nil {
+		t.Fatalf("save layout: %v", err)
+	}
+
+	restorer := &Restorer{Client: &mockClient{}, Store: store}
+	result, err := restorer.Restore("cwd-restore", true, RestoreModeAdd)
+	if err != nil {
+		t.Fatalf("restore dry-run: %v", err)
+	}
+
+	cdIndex := commandIndex(result.Commands, "cd '/tmp/other package'")
+	startIndex := commandIndex(result.Commands, "npm test")
+	if cdIndex < 0 || startIndex < 0 {
+		t.Fatalf("missing cwd restore commands: %#v", result.Commands)
+	}
+	if cdIndex > startIndex {
+		t.Fatalf("cwd command should precede startup command: %#v", result.Commands)
+	}
+	if sameCWDIndex := commandIndex(result.Commands, "cd '/tmp/project'"); sameCWDIndex >= 0 {
+		t.Fatalf("workspace cwd should not emit redundant cd: %#v", result.Commands)
+	}
+}
+
 func TestRestore_LayoutNotFound(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := persist.NewFileStore(dir)

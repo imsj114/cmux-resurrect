@@ -54,6 +54,7 @@ type Pane struct {
 type Surface struct {
 	Type     string `toml:"type"`
 	Title    string `toml:"title,omitempty"`
+	CWD      string `toml:"cwd,omitempty"`
 	URL      string `toml:"url,omitempty"`
 	Command  string `toml:"command,omitempty"`
 	Index    int    `toml:"index,omitempty"`

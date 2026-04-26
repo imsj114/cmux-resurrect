@@ -113,18 +113,23 @@ func runShow(cmd *cobra.Command, args []string) error {
 
 			fmt.Fprintf(os.Stderr, "   %s %s\n", prefix, desc)
 			for _, surface := range p.Surfaces {
-				if surface.URL == "" && surface.Command == "" {
+				if surface.URL == "" && surface.Command == "" && surface.CWD == "" {
 					continue
 				}
 				label := surface.Type
 				if label == "" {
 					label = "terminal"
 				}
+				if surface.CWD != "" {
+					fmt.Fprintf(os.Stderr, "   %s   %s\n", dimStyle.Render("│"), dimStyle.Render(label+" cwd "+surface.CWD))
+				}
 				value := surface.Command
 				if surface.URL != "" {
 					value = surface.URL
 				}
-				fmt.Fprintf(os.Stderr, "   %s   %s\n", dimStyle.Render("│"), dimStyle.Render(label+" "+value))
+				if value != "" {
+					fmt.Fprintf(os.Stderr, "   %s   %s\n", dimStyle.Render("│"), dimStyle.Render(label+" "+value))
+				}
 			}
 		}
 		fmt.Fprintln(os.Stderr)

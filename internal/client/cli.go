@@ -259,6 +259,14 @@ func (c *CLIClient) PaneListJSON(workspaceRef string) (*PaneListResponse, error)
 	return &resp, nil
 }
 
+func (c *CLIClient) TerminalListJSON() (*TerminalListResponse, error) {
+	var resp TerminalListResponse
+	if err := c.rpc("debug.terminals", map[string]any{}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *CLIClient) RemoteStatus(workspaceID string) (*RemoteStatusPayload, error) {
 	var resp struct {
 		Remote RemoteStatusPayload `json:"remote"`

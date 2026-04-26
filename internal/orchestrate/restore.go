@@ -317,7 +317,7 @@ func (r *Restorer) restorePanes(workspaceRef string, ws model.Workspace, result 
 	for i, pane := range ws.Panes {
 		if i == 0 {
 			paneRefs[pane.Index] = r.paneRefByIndex(workspaceRef, pane.Index)
-			r.restoreDefaultPaneSurfaces(workspaceRef, paneRefs[pane.Index], pane, result)
+			r.restoreDefaultPaneSurfaces(workspaceRef, paneRefs[pane.Index], ws, pane, result)
 			continue
 		}
 
@@ -332,7 +332,7 @@ func (r *Restorer) restorePanes(workspaceRef string, ws model.Workspace, result 
 			time.Sleep(DelayAfterSelect)
 		}
 
-		surfaceRef, paneRef := r.restoreNewPane(workspaceRef, pane, result)
+		surfaceRef, paneRef := r.restoreNewPane(workspaceRef, ws, pane, result)
 		if paneRef == "" && surfaceRef != "" {
 			paneRef = r.paneRefForSurface(workspaceRef, surfaceRef)
 		}
@@ -343,7 +343,7 @@ func (r *Restorer) restorePanes(workspaceRef string, ws model.Workspace, result 
 	}
 }
 
-func (r *Restorer) restoreDefaultPaneSurfaces(workspaceRef, paneRef string, pane model.Pane, result *RestoreResult) {
+func (r *Restorer) restoreDefaultPaneSurfaces(workspaceRef, paneRef string, ws model.Workspace, pane model.Pane, result *RestoreResult) {
 	surfaces := paneSurfaces(pane)
 	if len(surfaces) == 0 {
 		return
@@ -357,15 +357,13 @@ func (r *Restorer) restoreDefaultPaneSurfaces(workspaceRef, paneRef string, pane
 			Type:         "browser",
 			URL:          first.URL,
 		}, result)
-	} else if first.Command != "" {
-		if err := r.Client.Send(workspaceRef, "", first.Command+"\\n"); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("  pane %d send command: %v", pane.Index, err))
-		}
+	} else {
+		r.sendTerminalStartup(workspaceRef, "", ws, pane, first, result, fmt.Sprintf("pane %d", pane.Index))
 	}
-	r.restoreAdditionalSurfaces(workspaceRef, paneRef, surfaces[1:], result)
+	r.restoreAdditionalSurfaces(workspaceRef, paneRef, ws, pane, surfaces[1:], result)
 }
 
-func (r *Restorer) restoreNewPane(workspaceRef string, pane model.Pane, result *RestoreResult) (string, string) {
+func (r *Restorer) restoreNewPane(workspaceRef string, ws model.Workspace, pane model.Pane, result *RestoreResult) (string, string) {
 	surfaces := paneSurfaces(pane)
 	if len(surfaces) == 0 {
 		surfaces = []model.Surface{{Type: "terminal"}}
@@ -389,14 +387,10 @@ func (r *Restorer) restoreNewPane(workspaceRef string, pane model.Pane, result *
 			return "", ""
 		}
 		time.Sleep(DelayAfterSplit)
-		if first.Command != "" {
-			if err := r.Client.Send(workspaceRef, surfaceRef, first.Command+"\\n"); err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("  pane %d send command: %v", pane.Index, err))
-			}
-		}
+		r.sendTerminalStartup(workspaceRef, surfaceRef, ws, pane, first, result, fmt.Sprintf("pane %d", pane.Index))
 		paneRef = r.paneRefForSurface(workspaceRef, surfaceRef)
 	}
-	r.restoreAdditionalSurfaces(workspaceRef, paneRef, surfaces[1:], result)
+	r.restoreAdditionalSurfaces(workspaceRef, paneRef, ws, pane, surfaces[1:], result)
 	return surfaceRef, paneRef
 }
 
@@ -415,7 +409,7 @@ func (r *Restorer) createPaneSurface(workspaceRef string, opts client.PaneCreate
 	return surfaceRef, paneRef
 }
 
-func (r *Restorer) restoreAdditionalSurfaces(workspaceRef, paneRef string, surfaces []model.Surface, result *RestoreResult) {
+func (r *Restorer) restoreAdditionalSurfaces(workspaceRef, paneRef string, ws model.Workspace, pane model.Pane, surfaces []model.Surface, result *RestoreResult) {
 	if len(surfaces) == 0 {
 		return
 	}
@@ -441,10 +435,16 @@ func (r *Restorer) restoreAdditionalSurfaces(workspaceRef, paneRef string, surfa
 			continue
 		}
 		time.Sleep(DelayAfterSplit)
-		if surface.Type != "browser" && surface.Command != "" {
-			if err := r.Client.Send(workspaceRef, surfaceRef, surface.Command+"\\n"); err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("  surface send command: %v", err))
-			}
+		if surface.Type != "browser" {
+			r.sendTerminalStartup(workspaceRef, surfaceRef, ws, pane, surface, result, "surface")
+		}
+	}
+}
+
+func (r *Restorer) sendTerminalStartup(workspaceRef, surfaceRef string, ws model.Workspace, pane model.Pane, surface model.Surface, result *RestoreResult, label string) {
+	for _, line := range terminalStartupLines(ws, pane, surface) {
+		if err := r.Client.Send(workspaceRef, surfaceRef, line+"\\n"); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("  %s send command: %v", label, err))
 		}
 	}
 }
@@ -460,11 +460,41 @@ func paneSurfaces(pane model.Pane) []model.Surface {
 	}
 	return []model.Surface{{
 		Type:     normalizeSurfaceType(pane.Type),
+		CWD:      pane.CWD,
 		URL:      pane.URL,
 		Command:  pane.Command,
 		Index:    pane.Index,
 		Selected: pane.Focus,
 	}}
+}
+
+func terminalStartupLines(ws model.Workspace, pane model.Pane, surface model.Surface) []string {
+	var lines []string
+	if cwd := terminalSurfaceCWD(ws, pane, surface); cwd != "" {
+		lines = append(lines, "cd "+shellQuote(cwd))
+	}
+	if command := strings.TrimSpace(surface.Command); command != "" {
+		lines = append(lines, command)
+	}
+	return lines
+}
+
+func terminalSurfaceCWD(ws model.Workspace, pane model.Pane, surface model.Surface) string {
+	cwd := strings.TrimSpace(surface.CWD)
+	if cwd == "" {
+		cwd = strings.TrimSpace(pane.CWD)
+	}
+	if cwd == "" || cwd == strings.TrimSpace(ws.CWD) {
+		return ""
+	}
+	return cwd
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func normalizeSurfaceType(typ string) string {
@@ -566,7 +596,13 @@ func (r *Restorer) dryRunWorkspace(ws model.Workspace, result *RestoreResult) (s
 						URL:          surfaces[0].URL,
 					}))
 				} else if surfaces[0].Command != "" {
-					result.Commands = append(result.Commands, f.FmtSend(ref, surfaces[0].Command))
+					for _, line := range terminalStartupLines(ws, pane, surfaces[0]) {
+						result.Commands = append(result.Commands, f.FmtSend(ref, line))
+					}
+				} else {
+					for _, line := range terminalStartupLines(ws, pane, surfaces[0]) {
+						result.Commands = append(result.Commands, f.FmtSend(ref, line))
+					}
 				}
 			}
 			for _, surface := range surfaces[1:] {
@@ -576,8 +612,10 @@ func (r *Restorer) dryRunWorkspace(ws model.Workspace, result *RestoreResult) (s
 					Type:         surface.Type,
 					URL:          surface.URL,
 				}))
-				if surface.Type != "browser" && surface.Command != "" {
-					result.Commands = append(result.Commands, f.FmtSend(ref, surface.Command))
+				if surface.Type != "browser" {
+					for _, line := range terminalStartupLines(ws, pane, surface) {
+						result.Commands = append(result.Commands, f.FmtSend(ref, line))
+					}
 				}
 			}
 			continue
@@ -600,8 +638,8 @@ func (r *Restorer) dryRunWorkspace(ws model.Workspace, result *RestoreResult) (s
 			}))
 		} else {
 			result.Commands = append(result.Commands, f.FmtNewSplit(direction, ref))
-			if first.Command != "" {
-				result.Commands = append(result.Commands, f.FmtSend(ref, first.Command))
+			for _, line := range terminalStartupLines(ws, pane, first) {
+				result.Commands = append(result.Commands, f.FmtSend(ref, line))
 			}
 		}
 		for _, surface := range surfaces[1:] {
@@ -611,8 +649,10 @@ func (r *Restorer) dryRunWorkspace(ws model.Workspace, result *RestoreResult) (s
 				Type:         surface.Type,
 				URL:          surface.URL,
 			}))
-			if surface.Type != "browser" && surface.Command != "" {
-				result.Commands = append(result.Commands, f.FmtSend(ref, surface.Command))
+			if surface.Type != "browser" {
+				for _, line := range terminalStartupLines(ws, pane, surface) {
+					result.Commands = append(result.Commands, f.FmtSend(ref, line))
+				}
 			}
 		}
 	}

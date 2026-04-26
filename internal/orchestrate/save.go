@@ -24,6 +24,11 @@ type workspaceMetadataIndex struct {
 	byTitle map[string]client.WorkspaceRow
 }
 
+type terminalMetadataIndex struct {
+	byID  map[string]client.TerminalRow
+	byRef map[string]client.TerminalRow
+}
+
 // Save captures the live cmux state and writes it to the store.
 func (s *Saver) Save(name, description string) (*model.Layout, error) {
 	tree, err := s.Client.Tree()
@@ -46,10 +51,11 @@ func (s *Saver) Save(name, description string) (*model.Layout, error) {
 	}
 
 	metadata := s.workspaceMetadata()
+	terminalMetadata := s.terminalMetadata()
 	topologyCaptured := make(map[string]bool)
 	for _, tw := range win.Workspaces {
 		row, hasRow := metadata.find(tw)
-		ws, captured, err := s.buildWorkspace(tw, row, hasRow)
+		ws, captured, err := s.buildWorkspace(tw, row, hasRow, terminalMetadata)
 		if err != nil {
 			// Log but don't fail — isolate errors per workspace.
 			fmt.Fprintf(os.Stderr, "  warning: workspace %q: %v\n", tw.Title, err)
@@ -102,6 +108,30 @@ func (s *Saver) workspaceMetadata() workspaceMetadataIndex {
 	return idx
 }
 
+func (s *Saver) terminalMetadata() terminalMetadataIndex {
+	idx := terminalMetadataIndex{
+		byID:  make(map[string]client.TerminalRow),
+		byRef: make(map[string]client.TerminalRow),
+	}
+	remoteClient, ok := s.Client.(client.CmuxRemoteBackend)
+	if !ok {
+		return idx
+	}
+	resp, err := remoteClient.TerminalListJSON()
+	if err != nil || resp == nil {
+		return idx
+	}
+	for _, row := range resp.Terminals {
+		if row.SurfaceID != "" {
+			idx.byID[row.SurfaceID] = row
+		}
+		if row.SurfaceRef != "" {
+			idx.byRef[row.SurfaceRef] = row
+		}
+	}
+	return idx
+}
+
 func (idx workspaceMetadataIndex) find(tw client.TreeWorkspace) (client.WorkspaceRow, bool) {
 	if tw.ID != "" {
 		if row, ok := idx.byID[tw.ID]; ok {
@@ -121,7 +151,7 @@ func (idx workspaceMetadataIndex) find(tw client.TreeWorkspace) (client.Workspac
 	return client.WorkspaceRow{}, false
 }
 
-func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool) (*model.Workspace, bool, error) {
+func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow, hasRow bool, terminals terminalMetadataIndex) (*model.Workspace, bool, error) {
 	// Get CWD from sidebar-state.
 	sidebar, err := s.Client.SidebarState(tw.Ref)
 	if err != nil {
@@ -163,7 +193,7 @@ func (s *Saver) buildWorkspace(tw client.TreeWorkspace, row client.WorkspaceRow,
 			pane.Split = "right"
 		}
 
-		pane.Surfaces = buildSurfaces(tp)
+		pane.Surfaces = buildSurfaces(tp, terminals)
 		mirrorSelectedSurface(&pane, tp)
 
 		ws.Panes = append(ws.Panes, pane)
@@ -194,7 +224,7 @@ func remoteWorkspaceFromStatus(status client.RemoteStatusPayload) *model.RemoteW
 	return remote
 }
 
-func buildSurfaces(tp client.TreePane) []model.Surface {
+func buildSurfaces(tp client.TreePane, terminals terminalMetadataIndex) []model.Surface {
 	surfaces := make([]client.TreeSurface, len(tp.Surfaces))
 	copy(surfaces, tp.Surfaces)
 	sort.Slice(surfaces, func(i, j int) bool {
@@ -217,9 +247,30 @@ func buildSurfaces(tp client.TreePane) []model.Surface {
 		if surf.URL != nil {
 			item.URL = *surf.URL
 		}
+		if item.Type != "browser" {
+			item.CWD = terminals.cwdFor(surf)
+		}
 		result = append(result, item)
 	}
 	return result
+}
+
+func (idx terminalMetadataIndex) cwdFor(surface client.TreeSurface) string {
+	var row client.TerminalRow
+	var ok bool
+	if surface.ID != "" {
+		row, ok = idx.byID[surface.ID]
+	}
+	if !ok && surface.Ref != "" {
+		row, ok = idx.byRef[surface.Ref]
+	}
+	if !ok {
+		return ""
+	}
+	if cwd := strings.TrimSpace(row.CurrentDirectory); cwd != "" {
+		return cwd
+	}
+	return strings.TrimSpace(row.RequestedWorkingDirectory)
 }
 
 func mirrorSelectedSurface(pane *model.Pane, tp client.TreePane) {
@@ -234,6 +285,7 @@ func mirrorSelectedSurface(pane *model.Pane, tp client.TreePane) {
 		}
 	}
 	pane.Type = surfaceType(selected.Type)
+	pane.CWD = selected.CWD
 	pane.URL = selected.URL
 	pane.Command = selected.Command
 }
